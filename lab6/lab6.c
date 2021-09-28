@@ -9,7 +9,7 @@
 
 #define RATIO 200000
 #define BUF_SIZE 4096
-#define MAX_NUM_OF_STRINGS 100
+#define MAX_NUM_OF_LINES 100
 
 #define TRUE 1
 #define FALSE 0
@@ -31,7 +31,7 @@ void exact_usleep(unsigned time_left) {
     } while (time_left > 0);
 }
 
-void *wait_and_print(void *param) {
+void *sleep_and_print(void *param) {
     if (param == NULL) {
         fprintf(stderr, "wait_and_print: invalid param\n");
         return NULL;
@@ -47,7 +47,7 @@ void *wait_and_print(void *param) {
     return NULL;
 }
 
-char *read_strings(int *is_eof) {
+char *read_line(int *is_eof) {
     char *str = NULL;
     size_t length = 0;
 
@@ -57,18 +57,19 @@ char *read_strings(int *is_eof) {
             perror("read_strings: Unable to (re)allocate memory for string");
             break;
         }
-        str = ptr;
+        str = ptr; // realloc may return different pointer, so we need to update str
 
         errno = NO_ERROR;
         char *check = fgets(str + length, BUF_SIZE, stdin);
         if (check == NULL) {
-            if (errno != NO_ERROR)
+            if (errno != NO_ERROR) {
                 perror("read_strings: Unable to read from stdin");
+            }
             *is_eof = TRUE;
             break;
         }
 
-        length += strlen(check);
+        length += strlen(check); // check will be null-terminated
         if (str[length - 1] == '\n') {
             break;
         }
@@ -78,26 +79,24 @@ char *read_strings(int *is_eof) {
 }
 
 int main() {
-    char *strings[MAX_NUM_OF_STRINGS];
-    int num_of_strings = 0;
+    char *lines[MAX_NUM_OF_LINES];
+    int num_of_lines = 0;
     int is_eof = FALSE;
 
-    while (num_of_strings < MAX_NUM_OF_STRINGS && !is_eof) {
-        strings[num_of_strings] = read_strings(&is_eof);
-        if (strings[num_of_strings] == NULL)
+    while (num_of_lines < MAX_NUM_OF_LINES && !is_eof) {
+        lines[num_of_lines] = read_line(&is_eof);
+        if (lines[num_of_lines] == NULL) {
             break;
-
-        num_of_strings++;
+        }
+        num_of_lines++;
     }
 
-    for (int i = 0; i < num_of_strings; i++) {
+    for (int i = 0; i < num_of_lines; i++) {
         pthread_t thread;
-
-        int error_code = pthread_create(&thread, NULL, wait_and_print, strings[i]);
+        int error_code = pthread_create(&thread, NULL, sleep_and_print, lines[i]);
         if (error_code != NO_ERROR) {
             print_error("Unable to create thread", error_code);
-            free(strings[i]);
-            continue;
+            free(lines[i]);
         }
     }
 
