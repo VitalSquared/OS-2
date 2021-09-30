@@ -4,18 +4,9 @@
 #include <unistd.h>
 #include <string.h>
 
-#define NO_ERROR 0
-#define ERROR_BUF_SIZE 256
-
-#define DEFAULT_ATTRIBUTES NULL
-#define IGNORE_RETURN_VALUE NULL
-
 #define FOOD 50
 #define DELAY 30000
 #define NUM_OF_PHILO 5
-
-#define TRUE 1
-#define FALSE 0
 
 #define IS_STRING_EMPTY(STR) ((STR) == NULL || (STR)[0] == '\0')
 
@@ -37,7 +28,7 @@ void lock_mutex(pthread_mutex_t *mutex) {
     int error_code = pthread_mutex_lock(mutex);
     if (error_code != 0) {
         print_error("Unable to lock mutex", error_code);
-        exit(EXIT_FAILURE); // if mutex fails, something wrong with memory in process, should stop the whole process
+        exit(EXIT_FAILURE); // if mutex fails, the logic of program is lost, should stop the whole process
     }
 }
 
@@ -45,7 +36,7 @@ void unlock_mutex(pthread_mutex_t *mutex) {
     int error_code = pthread_mutex_unlock(mutex);
     if (error_code != 0) {
         print_error("Unable to unlock mutex", error_code);
-        exit(EXIT_FAILURE); // if mutex fails, something wrong with memory in process, should stop the whole process
+        exit(EXIT_FAILURE); // if mutex fails, the logic of program is lost, should stop the whole process
     }
 }
 
@@ -69,8 +60,8 @@ void pick_fork_up(int phil, int fork, char *hand) {
 }
 
 void put_forks_down(int left_fork, int right_fork) {
-    unlock_mutex(&forks_mutex[left_fork]);
-    unlock_mutex(&forks_mutex[right_fork]);
+    unlock_mutex(&forks_mutex[left_fork]);  //we first put down "bigger" fork
+    unlock_mutex(&forks_mutex[right_fork]); //then "smaller" fork
 }
 
 void *philosopher(void *param) {

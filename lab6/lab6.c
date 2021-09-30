@@ -5,8 +5,6 @@
 #include <unistd.h>
 #include <errno.h>
 
-#define NO_ERROR 0
-
 #define RATIO 200000
 #define BUF_SIZE 4096
 #define MAX_NUM_OF_LINES 100
@@ -59,17 +57,17 @@ char *read_line(int *is_eof) {
         }
         str = ptr; // realloc may return different pointer, so we need to update str
 
-        errno = NO_ERROR;
+        errno = 0;  //errno is unique to calling thread (furthermore, we call this function before spawning any threads)
         char *check = fgets(str + length, BUF_SIZE, stdin);
         if (check == NULL) {
-            if (errno != NO_ERROR) {
+            if (errno != 0) {
                 perror("read_strings: Unable to read from stdin");
             }
             *is_eof = TRUE;
             break;
         }
 
-        length += strlen(check); // check will be null-terminated
+        length += strlen(check); // 'check' will be null-terminated
         if (str[length - 1] == '\n') {
             break;
         }
@@ -79,9 +77,9 @@ char *read_line(int *is_eof) {
 }
 
 int main() {
-    char *lines[MAX_NUM_OF_LINES];
-    int num_of_lines = 0;
     int is_eof = FALSE;
+    int num_of_lines = 0;
+    char *lines[MAX_NUM_OF_LINES];
 
     while (num_of_lines < MAX_NUM_OF_LINES && !is_eof) {
         lines[num_of_lines] = read_line(&is_eof);
@@ -94,7 +92,7 @@ int main() {
     for (int i = 0; i < num_of_lines; i++) {
         pthread_t thread;
         int error_code = pthread_create(&thread, NULL, sleep_and_print, lines[i]);
-        if (error_code != NO_ERROR) {
+        if (error_code != 0) {
             print_error("Unable to create thread", error_code);
             free(lines[i]);
         }

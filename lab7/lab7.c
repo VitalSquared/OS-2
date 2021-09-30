@@ -169,7 +169,7 @@ void traverse_directory(DIR *dir, struct dirent *entry_buf, paths_t *old_paths) 
             print_error(old_paths->src, error_code);
             break;
         }
-        if (result == NULL) {
+        if (result == NULL) {   //readdir_r puts NULL in 'result' if end of directory encountered
             break;
         }
 
@@ -261,7 +261,7 @@ void copy_regular_file(paths_t *paths, mode_t mode) {
         return;
     }
 
-    int dest_fd = open_file_with_retry(paths->dest, O_WRONLY | O_CREAT | O_EXCL, mode);
+    int dest_fd = open_file_with_retry(paths->dest, O_WRONLY | O_CREAT | O_EXCL, mode); //O_CREAT + O_EXCL - return error if file already exists, otherwise create it
     if (dest_fd == -1) {
         close(src_fd);
         return;
