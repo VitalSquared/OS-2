@@ -4,8 +4,11 @@
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
+#include <math.h>
 
-#define NUMBER_OF_STEPS_IN_ITERATION 1000000
+#define NUMBER_OF_STEPS_IN_ITERATION 100000
+
+#define IN_RANGE(val, aim, off) (llabs((val) - (aim)) <= (off))
 
 #define TRUE 1
 #define FALSE 0
@@ -58,11 +61,11 @@ void *calculate_partial_sum(void *param) {
 
     lock_mutex(&max_iter_mutex);
     while (1) {
-        if (iteration > max_iterations) {
+        if (IN_RANGE(iteration, max_iterations, 1000)) {
             if (should_stop) {
                 break;
             }
-            else {
+            else if (iteration > max_iterations) {
                 max_iterations = iteration;
             }
         }
@@ -116,7 +119,7 @@ long create_threads(pthread_t *threads, union sum_data *data) {
     int error_code;
     long num_of_created = 0;
 
-    for (long i = 0; i < number_of_threads; i++) {
+    for (long i = 0; i < number_of_threads && !should_stop; i++) {
         data[i].index = i;
 
         error_code = pthread_create(&threads[i], NULL, calculate_partial_sum, &data[i]);
@@ -159,25 +162,10 @@ int join_threads(pthread_t *threads, double *pi) {
     return return_value;
 }
 
-int init_signal_mask(sigset_t *sigset, int sig) {
-    if (sigemptyset(sigset) == -1 || sigaddset(sigset, sig) == -1 || sigprocmask(SIG_BLOCK, sigset, NULL) == -1) {
-        perror("Failed to initialize signal process mask");
-        return -1;
+void handle_sigint(int sig) {
+    if (sig == SIGINT) {
+        should_stop = TRUE;
     }
-    return 0;
-}
-
-int wait_for_signal(sigset_t *sigset, int sig) {
-    int res;
-    do {
-        if (sigwait(sigset, &res) == -1) {
-            perror("sigwait error");
-            return -1;
-        }
-    } while (res != sig);
-
-    fprintf(stderr, " signal caught. Stopping PI calculation\n");
-    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -186,8 +174,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    sigset_t sigset;
-    if (init_signal_mask(&sigset, SIGINT) == -1) {
+    if (signal(SIGINT, handle_sigint) == SIG_ERR) {
         return EXIT_FAILURE;
     }
 
@@ -198,18 +185,16 @@ int main(int argc, char **argv) {
     if (num_of_created < number_of_threads) {
         should_stop = TRUE;
         fprintf(stderr, "Couldn't create requested amount of threads!\n");
-        pthread_exit(NULL); // we let already created threads finish their work
     }
 
-    wait_for_signal(&sigset, SIGINT);
-    should_stop = TRUE;
+    if (num_of_created == 0) {
+        return EXIT_FAILURE;
+    }
 
     double pi = 0.0;
-    if (join_threads(threads, &pi) != 0) {
-        fprintf(stderr, "Couldn't calculate PI!\n");
-        pthread_exit(NULL); // we let unjoined threads finish their work
-    }
+    join_threads(threads, &pi);
 
     printf("pi = %.16f\n", pi);
+    printf("real pi = %.16f\n", M_PI);
     return EXIT_SUCCESS;
 }
