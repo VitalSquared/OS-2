@@ -23,16 +23,16 @@ void print_error(const char *prefix, int code) {
     fprintf(stderr, "%s: %s\n", prefix, buf);
 }
 
-void lock_mutex(pthread_mutex_t *mutex) {
-    int error_code = pthread_mutex_lock(mutex);
+void lock_mutex(int mutex_num) {
+    int error_code = pthread_mutex_lock(&mutexes[mutex_num]);
     if (error_code != 0) {
         print_error("Unable to lock mutex", error_code);
         exit(EXIT_FAILURE); //we should stop the whole process if mutex_lock fails
     }
 }
 
-void unlock_mutex(pthread_mutex_t *mutex) {
-    int error_code = pthread_mutex_unlock(mutex);
+void unlock_mutex(int mutex_num) {
+    int error_code = pthread_mutex_unlock(&mutexes[mutex_num]);
     if (error_code != 0) {
         print_error("Unable to unlock mutex", error_code);
         exit(EXIT_FAILURE); //we should stop the whole process if mutex_lock fails
@@ -40,35 +40,35 @@ void unlock_mutex(pthread_mutex_t *mutex) {
 }
 
 void *second_print(void *param) {
-    lock_mutex(&mutexes[2]);
+    lock_mutex(2);
     thread_locked_mutex = TRUE; //we don't need mutex here since this operation is atomic
     for (int i = 0; i < NUMBER_OF_LINES; i++) {
-        lock_mutex(&mutexes[1]);
+        lock_mutex(1);
         write(STDOUT_FILENO, "Child\n", 6);
-        unlock_mutex(&mutexes[2]);
-        lock_mutex(&mutexes[0]);
-        unlock_mutex(&mutexes[1]);
-        lock_mutex(&mutexes[2]);
-        unlock_mutex(&mutexes[1]);
+        unlock_mutex(2);
+        lock_mutex(0);
+        unlock_mutex(1);
+        lock_mutex(2);
+        unlock_mutex(0);
     }
-    unlock_mutex(&mutexes[2]);
+    unlock_mutex(2);
     return NULL;
 }
 
 void first_print() {
     for (int i = 0; i < NUMBER_OF_LINES; i++) {
         write(STDOUT_FILENO, "Parent\n", 7);
-        lock_mutex(&mutexes[0]);
-        unlock_mutex(&mutexes[1]);
-        lock_mutex(&mutexes[2]);
-        unlock_mutex(&mutexes[0]);
-        lock_mutex(&mutexes[1]);
-        unlock_mutex(&mutexes[2]);
+        lock_mutex(0);
+        unlock_mutex(1);
+        lock_mutex(2);
+        unlock_mutex(0);
+        lock_mutex(1);
+        unlock_mutex(2);
     }
 }
 
 int main() {
-    lock_mutex(&mutexes[1]);
+    lock_mutex(1);
     pthread_t thread;
 
     int error_code = pthread_create(&thread, NULL, second_print, NULL);
@@ -82,6 +82,6 @@ int main() {
     }
 
     first_print();
-    unlock_mutex(&mutexes[1]);
+    unlock_mutex(1);
     pthread_exit(NULL);
 }

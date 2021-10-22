@@ -6,9 +6,7 @@
 #include <signal.h>
 #include <math.h>
 
-#define NUMBER_OF_STEPS_IN_ITERATION 100000
-
-#define IN_RANGE(val, aim, off) (llabs((val) - (aim)) <= (off))
+#define BLOCK_SIZE 2000
 
 #define TRUE 1
 #define FALSE 0
@@ -36,15 +34,17 @@ void print_error(const char *prefix, int code) {
 
 int lock_mutex(pthread_mutex_t *mutex) {
     int error_code = pthread_mutex_lock(mutex);
-    if (error_code != 0)
+    if (error_code != 0) {
         print_error("Unable to lock mutex", error_code);
+    }
     return error_code;
 }
 
 int unlock_mutex(pthread_mutex_t *mutex) {
     int error_code = pthread_mutex_unlock(mutex);
-    if (error_code != 0)
+    if (error_code != 0) {
         print_error("Unable to unlock mutex", error_code);
+    }
     return error_code;
 }
 
@@ -59,30 +59,32 @@ void *calculate_partial_sum(void *param) {
     double partial_sum = 0.0;
     long iteration = 0;
 
-    lock_mutex(&max_iter_mutex);
     while (1) {
-        if (IN_RANGE(iteration, max_iterations, 1000)) {
-            if (should_stop) {
+        if (should_stop && iteration != 0) {
+            lock_mutex(&max_iter_mutex);
+            if (iteration >= max_iterations) {
+                unlock_mutex(&max_iter_mutex);
                 break;
             }
-            else if (iteration > max_iterations) {
+            unlock_mutex(&max_iter_mutex);
+        }
+        else {
+            lock_mutex(&max_iter_mutex);
+            if (iteration > max_iterations) {
                 max_iterations = iteration;
             }
+            unlock_mutex(&max_iter_mutex);
+            sched_yield();
         }
-        unlock_mutex(&max_iter_mutex);
 
-        long start = iteration * NUMBER_OF_STEPS_IN_ITERATION + index;
-        long end = (iteration + 1) * NUMBER_OF_STEPS_IN_ITERATION;
-        for (long long i = start; i < end; i += number_of_threads) {
+        long start = (iteration * number_of_threads + index) * BLOCK_SIZE;
+        long end = start + BLOCK_SIZE;
+        for (long long i = start; i < end; i++) {
             partial_sum += 1.0 / (i * 4.0 + 1.0);
             partial_sum -= 1.0 / (i * 4.0 + 3.0);
         }
         iteration++;
-
-        sched_yield();
-        lock_mutex(&max_iter_mutex);
     }
-    unlock_mutex(&max_iter_mutex);
 
     data->partial_sum = partial_sum;
     printf("Thread %lld finished, iterations = %ld, partial sum %.16f\n", index, iteration, data->partial_sum);

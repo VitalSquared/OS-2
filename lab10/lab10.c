@@ -8,10 +8,9 @@
 #define DELAY 30000
 #define NUM_OF_PHILO 5
 
-#define IS_STRING_EMPTY(STR) ((STR) == NULL || (STR)[0] == '\0')
-
 pthread_mutex_t food_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t forks_mutex[NUM_OF_PHILO] = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER };
+pthread_t threads[NUM_OF_PHILO];
 
 void print_error(const char *prefix, int code) {
     if (prefix == NULL) {
@@ -24,47 +23,57 @@ void print_error(const char *prefix, int code) {
     fprintf(stderr, "%s: %s\n", prefix, buf);
 }
 
-void lock_mutex(pthread_mutex_t *mutex) {
+void cancel_threads(int id) {
+    for (int i = 0; i < NUM_OF_PHILO; i++) {
+        if (id == i) continue;
+        pthread_cancel(threads[i]);
+    }
+    pthread_cancel(threads[id]);    //we cancel calling thread last, because it's cancel-type is ASYNC (so it doesn't cancel until all other threads are cancelled
+}
+
+void lock_mutex(pthread_mutex_t *mutex, int id) {
     int error_code = pthread_mutex_lock(mutex);
     if (error_code != 0) {
         print_error("Unable to lock mutex", error_code);
-        exit(EXIT_FAILURE); // if mutex fails, the logic of program is lost, should stop the whole process
+        cancel_threads(id);
     }
 }
 
-void unlock_mutex(pthread_mutex_t *mutex) {
+void unlock_mutex(pthread_mutex_t *mutex, int id) {
     int error_code = pthread_mutex_unlock(mutex);
     if (error_code != 0) {
         print_error("Unable to unlock mutex", error_code);
-        exit(EXIT_FAILURE); // if mutex fails, the logic of program is lost, should stop the whole process
+        cancel_threads(id);
     }
 }
 
-int get_food() {
+int get_food(int id) {
     static int total_food = FOOD;
     int my_food;
 
-    lock_mutex(&food_mutex);
+    lock_mutex(&food_mutex, id);
+    my_food = total_food;
     if (total_food > 0) {
         total_food--;
     }
-    my_food = total_food;
-    unlock_mutex(&food_mutex);
+    unlock_mutex(&food_mutex, id);
 
     return my_food;
 }
 
 void pick_fork_up(int phil, int fork, char *hand) {
-    lock_mutex(&forks_mutex[fork]);
+    lock_mutex(&forks_mutex[fork], phil);
     printf("Philosopher %d: got %s fork %d\n", phil, hand, fork);
 }
 
-void put_forks_down(int left_fork, int right_fork) {
-    unlock_mutex(&forks_mutex[left_fork]);  //we first put down "bigger" fork
-    unlock_mutex(&forks_mutex[right_fork]); //then "smaller" fork
+void put_forks_down(int left_fork, int right_fork, int id) {
+    unlock_mutex(&forks_mutex[left_fork], id);  //we first put down "bigger" fork
+    unlock_mutex(&forks_mutex[right_fork], id); //then "smaller" fork
 }
 
 void *philosopher(void *param) {
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
     int id = (int)param;
     int right_fork = id;
     int left_fork = id + 1;
@@ -78,7 +87,9 @@ void *philosopher(void *param) {
     printf("Philosopher %d sitting down to dinner.\n", id);
 
     int food;
-    while ((food = get_food()) > 0) {
+    int total = 0;
+    while ((food = get_food(id)) > 0) {
+        total++;
         printf("Philosopher %d: gets food %d.\n", id, food);
 
         pick_fork_up(id, right_fork, "right");  // we always pick up "smaller" fork first
@@ -87,23 +98,21 @@ void *philosopher(void *param) {
         printf("Philosopher %d: eats.\n", id);
         usleep(DELAY * (FOOD - food + 1));
 
-        put_forks_down(left_fork, right_fork);
+        put_forks_down(left_fork, right_fork, id);
+        sched_yield();  //try to let scheduler schedule other threads
     }
 
-    printf("Philosopher %d is done eating.\n", id);
+    printf("Philosopher %d is done eating. Ate %d out of %d portions\n", id, total, FOOD);
     return NULL;
 }
 
 int main() {
     int error_code;
-    pthread_t threads[NUM_OF_PHILO];
-
     for (int i = 0; i < NUM_OF_PHILO; i++) {
         error_code = pthread_create(&threads[i], NULL, philosopher, (void *)i);
         if (error_code != 0) {
             print_error("Unable to create thread", error_code);
         }
     }
-
     pthread_exit(NULL);
 }
