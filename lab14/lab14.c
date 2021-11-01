@@ -26,14 +26,12 @@ void print_error(const char *prefix, int code) {
 void wait_semaphore(sem_t *sem) {
     if (sem_wait(sem) == -1) {
         perror("Unable to wait semaphore");
-        exit(EXIT_FAILURE); //we should stop the whole process if sem_wait fails
     }
 }
 
 void post_semaphore(sem_t *sem) {
     if (sem_post(sem) == -1) {
         perror("Unable to wait semaphore");
-        exit(EXIT_FAILURE); //we should stop the whole process if sem_wait fails
     }
 }
 

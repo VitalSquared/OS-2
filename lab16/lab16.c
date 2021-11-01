@@ -9,8 +9,18 @@
 #define NUMBER_OF_LINES 10
 #define NUMBER_OF_SEMAPHORES 2
 
-pid_t relative; //in parent process - pid of child; in child process - pid of parent;
+#define TRUE 1
+#define FALSE 0
+
+pid_t relative;
 sem_t *semaphores[NUMBER_OF_SEMAPHORES];
+int sigusr_sent = FALSE;
+
+void handle_sigusr(int sig) {
+    if (sig == SIGUSR1) {
+        sigusr_sent = TRUE;
+    }
+}
 
 void print_messages(int first_sem, int second_sem, const char *message) {
     if (message == NULL) {
@@ -19,10 +29,12 @@ void print_messages(int first_sem, int second_sem, const char *message) {
     }
     size_t msg_length = strlen(message);
 
-    for (int i = 0; i < NUMBER_OF_LINES; i++) {
+    for (int i = 0; i < NUMBER_OF_LINES && !sigusr_sent; i++) {
         if (sem_wait(semaphores[first_sem]) == -1) {
             perror("Unable to wait semaphore");
-            kill(relative, SIGKILL);
+            if (!sigusr_sent) {
+                kill(relative, SIGUSR1);
+            }
             return;
         }
 
@@ -30,15 +42,26 @@ void print_messages(int first_sem, int second_sem, const char *message) {
             perror("Unable to write to stdout");
         }
 
+        if (sigusr_sent) {
+            return;
+        }
+
         if (sem_post(semaphores[second_sem]) == -1) {
             perror("Unable to post semaphore");
-            kill(relative, SIGKILL);
+            if (!sigusr_sent) {
+                kill(relative, SIGUSR1);
+            }
             return;
         }
     }
 }
 
 int main() {
+    if (signal(SIGUSR1, handle_sigusr) == SIG_ERR) {
+        perror("Unable to set signal handler");
+        return EXIT_FAILURE;
+    }
+
     int sem_init_values[NUMBER_OF_SEMAPHORES] = { 1, 0 };
     const char *sem_names[NUMBER_OF_SEMAPHORES] = { "/first", "/second" };
 
@@ -80,8 +103,8 @@ int main() {
     relative = pid; //get child pid from fork()
     print_messages(0, 1, "Parent\n");
 
-    pid_t waited_pid = wait(NULL);
-    if (waited_pid == -1) {
+    pid_t wait_pid = wait(NULL);
+    if (wait_pid == -1) {
         perror("Unable to wait child process");
     }
 
