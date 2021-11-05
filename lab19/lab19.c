@@ -62,26 +62,22 @@ node_t *list_create() {
         return NULL;
     }
 
-    head->next = NULL;
-    head->value = NULL;
-
     int error_code = pthread_mutex_init(&head->mutex, NULL);
     if (error_code != 0) {
-        print_error("Unable to init head mutex", error_code);
         free(head);
+        print_error("Unable to init head mutex", error_code);
         return NULL;
     }
+
+    head->next = NULL;
+    head->value = NULL;
 
     return head;
 }
 
 void free_node(node_t *node) {
     if (node != NULL) {
-        int error_code = pthread_mutex_destroy(&node->mutex);
-        if (error_code != 0) {
-            print_error("Unable to destroy mutex", error_code);
-        }
-
+        pthread_mutex_destroy(&node->mutex);
         free(node->value);
         free(node);
     }
@@ -94,7 +90,7 @@ void list_destroy(node_t *head) {
 
     node_t *cur = head;
     node_t *next = NULL;
-    while (NULL != cur) {
+    while (cur != NULL) {
         next = cur->next;
         free_node(cur);
         cur = next;
@@ -112,20 +108,17 @@ int list_insert(node_t *head, const char *str) {
         return -1;
     }
 
-    size_t str_length = strlen(str);
-    new_node->value = (char *)malloc(str_length + 1);
-    if (new_node->value == NULL) {
-        perror("Unable to allocate memory for node value");
-        free(new_node);
-        return -1;
-    }
-    memcpy(new_node->value, str, str_length + 1);
-
     int error_code = pthread_mutex_init(&new_node->mutex, NULL);
     if (error_code != 0) {
         print_error("Unable to init mutex", error_code);
-        free(new_node->value);
         free(new_node);
+        return -1;
+    }
+
+    new_node->value = strdup(str);
+    if (new_node->value == NULL) {
+        perror("Unable to allocate memory for node value");
+        free_node(new_node);
         return -1;
     }
 
@@ -146,10 +139,10 @@ int list_sort(node_t *head) {
     }
 
     node_t *prev, *cur, *next;
-    int is_disorder = TRUE;
+    int disordered = TRUE;
 
-    while (is_disorder) {
-        is_disorder = FALSE;
+    while (disordered) {
+        disordered = FALSE;
         prev = head;
 
         if (lock_node_mutex(prev) != 0) return -1;
@@ -163,13 +156,13 @@ int list_sort(node_t *head) {
                 if (lock_node_mutex(next) != 0) return -1;
 
                 if (!STR_ORDERED(cur->value, next->value)) {
-                    is_disorder = TRUE;
+                    disordered = TRUE;
                     cur->next = next->next;
                     next->next = cur;
                     prev->next = next;
 
-                    cur = next;         // \was: ...-prev-cur-next-...  now: ...-prev-next-cur-...
-                    next = cur->next;   // /so we need to say that 'cur' is now next, and 'next' is cur
+                    cur = next;
+                    next = cur->next;
                 }
 
                 if (unlock_node_mutex(prev) != 0) return -1;
@@ -308,5 +301,5 @@ int main() {
     list_destroy(global_list_head);
     global_list_head = NULL;
 
-    pthread_exit(NULL); //if other threads failed to be cancelled or joined, we let them finish on their own, since 'global_list_head' is now NULL
+    pthread_exit(NULL);
 }

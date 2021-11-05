@@ -58,8 +58,8 @@ list_t *list_create() {
     lst->head = NULL;
     int error_code = pthread_mutex_init(&lst->mutex, NULL);
     if (error_code != 0) {
-        print_error("Unable to init list mutex", error_code);
         free(lst);
+        print_error("Unable to init list mutex", error_code);
         return NULL;
     }
 
@@ -106,14 +106,12 @@ int list_insert(list_t *lst, const char *str) {
         return -1;
     }
 
-    size_t str_length = strlen(str);
-    new_node->value = (char *)malloc(str_length + 1);
+    new_node->value = strdup(str);
     if (new_node->value == NULL) {
         perror("Unable to allocate memory for node value");
         free(new_node);
         return -1;
     }
-    memcpy(new_node->value, str, str_length + 1);
 
     if (lock_mutex(&lst->mutex) != 0) {
         free_node(new_node);
@@ -238,5 +236,5 @@ int main() {
     list_destroy(global_list);
     global_list = NULL;
 
-    pthread_exit(NULL); //if other thread failed to be cancelled or joined, we let it finish on its own, since 'global_list' is now NULL
+    pthread_exit(NULL);
 }
