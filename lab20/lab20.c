@@ -87,6 +87,8 @@ void list_destroy(list_t *lst) {
         return;
     }
 
+    write_lock_rwlock(&lst->rwlock);
+
     node_t *cur = lst->head;
     node_t *next = NULL;
     while (cur != NULL) {
@@ -94,6 +96,8 @@ void list_destroy(list_t *lst) {
         free_node(cur);
         cur = next;
     }
+
+    unlock_rwlock(&lst->rwlock);
 
     int error_code = pthread_rwlock_destroy(&lst->rwlock);
     if (error_code != 0) {

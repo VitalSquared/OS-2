@@ -21,6 +21,7 @@ typedef struct node {
 } node_t;
 
 node_t *global_list_head = NULL;
+int should_mid_sleep = TRUE;
 
 void print_error(const char *prefix, int code) {
     if (prefix == NULL) {
@@ -77,8 +78,9 @@ node_t *list_create() {
 
 void free_node(node_t *node) {
     if (node != NULL) {
-        pthread_mutex_destroy(&node->mutex);
         free(node->value);
+        unlock_node_mutex(node);
+        pthread_mutex_destroy(&node->mutex);
         free(node);
     }
 }
@@ -91,6 +93,7 @@ void list_destroy(node_t *head) {
     node_t *cur = head;
     node_t *next = NULL;
     while (cur != NULL) {
+        lock_node_mutex(cur);
         next = cur->next;
         free_node(cur);
         cur = next;
@@ -171,7 +174,9 @@ int list_sort(node_t *head) {
                 cur = next;
                 next = next->next;
 
-                sleep(MID_SORT_WAIT_SECONDS);
+                if (should_mid_sleep) {
+                    sleep(MID_SORT_WAIT_SECONDS);
+                }
             }
 
             if (unlock_node_mutex(cur) != 0) return -1;
@@ -220,10 +225,12 @@ void *interval_list_sorting(void *param) {
     while (global_list_head != NULL) {
         sleep(sleep_time);
 
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
         if (list_sort(global_list_head) == -1) {
             fprintf(stderr, "Sorting thread encountered error. Sorting stopped.\n");
             break;
         }
+        pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     }
 
     return NULL;
@@ -290,10 +297,10 @@ int main() {
 
     get_strings();
 
+    should_mid_sleep = FALSE;
     for (int i = 0; i < num_of_created; i++) {
         pthread_cancel(threads[i]);
     }
-
     for (int i = 0; i < num_of_created; i++) {
         pthread_join(threads[i], NULL);
     }

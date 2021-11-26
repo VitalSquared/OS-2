@@ -76,8 +76,9 @@ node_t *list_create() {
 
 void free_node(node_t *node) {
     if (node != NULL) {
-        pthread_mutex_destroy(&node->mutex);
         free(node->value);
+        unlock_node_mutex(node);
+        pthread_mutex_destroy(&node->mutex);
         free(node);
     }
 }
@@ -90,6 +91,7 @@ void list_destroy(node_t *head) {
     node_t *cur = head;
     node_t *next = NULL;
     while (cur != NULL) {
+        lock_node_mutex(cur);
         next = cur->next;
         free_node(cur);
         cur = next;
@@ -290,7 +292,6 @@ int main() {
     for (int i = 0; i < num_of_created; i++) {
         pthread_cancel(threads[i]);
     }
-
     for (int i = 0; i < num_of_created; i++) {
         pthread_join(threads[i], NULL);
     }

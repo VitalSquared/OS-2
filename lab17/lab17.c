@@ -79,6 +79,8 @@ void list_destroy(list_t *lst) {
         return;
     }
 
+    lock_mutex(&lst->mutex);
+
     node_t *cur = lst->head;
     node_t *next = NULL;
     while (cur != NULL) {
@@ -86,6 +88,8 @@ void list_destroy(list_t *lst) {
         free_node(cur);
         cur = next;
     }
+
+    unlock_mutex(&lst->mutex);
 
     int error_code = pthread_mutex_destroy(&lst->mutex);
     if (error_code != 0) {
