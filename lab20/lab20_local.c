@@ -14,7 +14,7 @@
 #define STR_ORDERED(STR1, STR2) (strcmp(STR1, STR2) <= 0)
 
 typedef struct node {
-    pthread_mutex_t mutex;
+    pthread_rwlock_t rwlock;
     char *value;
     struct node *next;
 } node_t;
@@ -32,24 +32,38 @@ void print_error(const char *prefix, int code) {
     fprintf(stderr, "%s: %s\n", prefix, buf);
 }
 
-int lock_node_mutex(node_t *node) {
+int read_lock_node_rwlock(node_t *node) {
     if (node == NULL) {
         return 0;
     }
-    int error_code = pthread_mutex_lock(&node->mutex);
+
+    int error_code = pthread_rwlock_rdlock(&node->rwlock);
     if (error_code != 0) {
-        print_error("Unable to lock mutex", error_code);
+        print_error("Unable to read-lock rwlock", error_code);
     }
     return error_code;
 }
 
-int unlock_node_mutex(node_t *node) {
+int write_lock_node_rwlock(node_t *node) {
     if (node == NULL) {
         return 0;
     }
-    int error_code = pthread_mutex_unlock(&node->mutex);
+
+    int error_code = pthread_rwlock_wrlock(&node->rwlock);
     if (error_code != 0) {
-        print_error("Unable to unlock mutex", error_code);
+        print_error("Unable to write-lock rwlock", error_code);
+    }
+    return error_code;
+}
+
+int unlock_node_rwlock(node_t *node) {
+    if (node == NULL) {
+        return 0;
+    }
+
+    int error_code = pthread_rwlock_unlock(&node->rwlock);
+    if (error_code != 0) {
+        print_error("Unable to unlock rwlock", error_code);
     }
     return error_code;
 }
@@ -61,10 +75,10 @@ node_t *list_create() {
         return NULL;
     }
 
-    int error_code = pthread_mutex_init(&head->mutex, NULL);
+    int error_code = pthread_rwlock_init(&head->rwlock, NULL);
     if (error_code != 0) {
         free(head);
-        print_error("Unable to init head mutex", error_code);
+        print_error("Unable to init head rwlock", error_code);
         return NULL;
     }
 
@@ -76,7 +90,7 @@ node_t *list_create() {
 
 void free_node(node_t *node) {
     if (node != NULL) {
-        pthread_mutex_destroy(&node->mutex);
+        pthread_rwlock_destroy(&node->rwlock);
         free(node->value);
         free(node);
     }
@@ -107,9 +121,9 @@ int list_insert(node_t *head, const char *str) {
         return -1;
     }
 
-    int error_code = pthread_mutex_init(&new_node->mutex, NULL);
+    int error_code = pthread_rwlock_init(&new_node->rwlock, NULL);
     if (error_code != 0) {
-        print_error("Unable to init mutex", error_code);
+        print_error("Unable to init rwlock", error_code);
         free(new_node);
         return -1;
     }
@@ -121,7 +135,7 @@ int list_insert(node_t *head, const char *str) {
         return -1;
     }
 
-    if (lock_node_mutex(head) != 0) {
+    if (write_lock_node_rwlock(head) != 0) {
         free_node(new_node);
         return -1;
     }
@@ -129,7 +143,7 @@ int list_insert(node_t *head, const char *str) {
     new_node->next = head->next;
     head->next = new_node;
 
-    return unlock_node_mutex(head) == 0 ? 0 : -1;
+    return unlock_node_rwlock(head) == 0 ? 0 : -1;
 }
 
 int list_sort(node_t *head) {
@@ -144,15 +158,15 @@ int list_sort(node_t *head) {
         disordered = FALSE;
         prev = head;
 
-        if (lock_node_mutex(prev) != 0) return -1;
+        if (write_lock_node_rwlock(prev) != 0) return -1;
 
         cur = prev->next;
         if (cur != NULL) {
-            if (lock_node_mutex(cur) != 0) return -1;
+            if (write_lock_node_rwlock(cur) != 0) return -1;
 
             next = cur->next;
             while (next != NULL) {
-                if (lock_node_mutex(next) != 0) return -1;
+                if (write_lock_node_rwlock(next) != 0) return -1;
 
                 if (!STR_ORDERED(cur->value, next->value)) {
                     disordered = TRUE;
@@ -164,17 +178,17 @@ int list_sort(node_t *head) {
                     next = cur->next;
                 }
 
-                if (unlock_node_mutex(prev) != 0) return -1;
+                if (unlock_node_rwlock(prev) != 0) return -1;
 
                 prev = cur;
                 cur = next;
                 next = next->next;
             }
 
-            if (unlock_node_mutex(cur) != 0) return -1;
+            if (unlock_node_rwlock(cur) != 0) return -1;
         }
 
-        if (unlock_node_mutex(prev) != 0) return -1;
+        if (unlock_node_rwlock(prev) != 0) return -1;
     }
 
     return 0;
@@ -187,13 +201,13 @@ int list_print(node_t *head) {
     }
 
     node_t *prev = head;
-    if (lock_node_mutex(prev) != 0) return -1;
+    if (read_lock_node_rwlock(prev) != 0) return -1;
 
     printf("--Your list--\n");
     node_t *cur = prev->next;
     while (cur != NULL) {
-        if (lock_node_mutex(cur) != 0) return -1;
-        if (unlock_node_mutex(prev) != 0) return -1;
+        if (read_lock_node_rwlock(cur) != 0) return -1;
+        if (unlock_node_rwlock(prev) != 0) return -1;
 
         printf("%s\n", cur->value);
 
@@ -202,7 +216,7 @@ int list_print(node_t *head) {
     }
     printf("--End of list--\n");
 
-    if (unlock_node_mutex(prev) != 0) return -1;
+    if (unlock_node_rwlock(prev) != 0) return -1;
 
     return 0;
 }
@@ -223,7 +237,7 @@ void *interval_list_sorting(void *param) {
         }
     }
 
-    return NULL;
+    return param;
 }
 
 int get_strings() {
@@ -266,7 +280,7 @@ int get_strings() {
 
 int main() {
     pthread_t threads[NUMBER_OF_SORTING_THREADS];
-    int thread_sort_intervals_seconds[NUMBER_OF_SORTING_THREADS] = { 5, 5, 5, 5, 5 };
+    int thread_sort_intervals_seconds[NUMBER_OF_SORTING_THREADS] = { 5, 4, 3, 2, 1 };
     int error_code;
 
     global_list_head = list_create();

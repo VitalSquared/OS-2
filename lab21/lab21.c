@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define NUMBER_OF_SORTING_THREADS 1
+#define NUMBER_OF_SORTING_THREADS 5
 #define MID_SORT_WAIT_SECONDS 1
 
 #define BUF_SIZE 80
@@ -92,9 +92,8 @@ node_t *list_create() {
 
 void free_node(node_t *node) {
     if (node != NULL) {
-        free(node->value);
-        unlock_node_rwlock(node);
         pthread_rwlock_destroy(&node->rwlock);
+        free(node->value);
         free(node);
     }
 }
@@ -107,7 +106,6 @@ void list_destroy(node_t *head) {
     node_t *cur = head;
     node_t *next = NULL;
     while (cur != NULL) {
-        write_lock_node_rwlock(cur);
         next = cur->next;
         free_node(cur);
         cur = next;
@@ -189,7 +187,18 @@ int list_sort(node_t *head) {
                 next = next->next;
 
                 if (should_mid_sleep) {
+                    if (unlock_node_rwlock(prev) != 0) return -1;
+                    if (unlock_node_rwlock(cur) != 0) return -1;
+
                     sleep(MID_SORT_WAIT_SECONDS);
+
+                    if (write_lock_node_rwlock(prev) != 0) return -1;
+
+                    cur = prev->next;
+                    if (cur == NULL) break;
+                    if (write_lock_node_rwlock(cur) != 0) return -1;
+
+                    next = cur->next;
                 }
             }
 
@@ -247,7 +256,7 @@ void *interval_list_sorting(void *param) {
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     }
 
-    return NULL;
+    return param;
 }
 
 int get_strings() {
@@ -290,7 +299,7 @@ int get_strings() {
 
 int main() {
     pthread_t threads[NUMBER_OF_SORTING_THREADS];
-    int thread_sort_intervals_seconds[NUMBER_OF_SORTING_THREADS] = { 5 };
+    int thread_sort_intervals_seconds[NUMBER_OF_SORTING_THREADS] = { 5, 4, 3, 2, 1 };
     int error_code;
 
     global_list_head = list_create();
