@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define NUMBER_OF_SORTING_THREADS 1
+#define NUMBER_OF_SORTING_THREADS 5
 
 #define BUF_SIZE 80
 
@@ -268,7 +268,7 @@ int get_strings() {
 
 int main() {
     pthread_t threads[NUMBER_OF_SORTING_THREADS];
-    int thread_sort_intervals_seconds[NUMBER_OF_SORTING_THREADS] = { 5 };
+    int thread_sort_intervals_seconds[NUMBER_OF_SORTING_THREADS] = { 5, 5, 5, 5, 5 };
     int error_code;
 
     global_list_head = list_create();

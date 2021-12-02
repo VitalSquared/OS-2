@@ -22,6 +22,7 @@ typedef struct node {
 
 node_t *global_list_head = NULL;
 int should_mid_sleep = TRUE;
+pthread_mutex_t sleep_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void print_error(const char *prefix, int code) {
     if (prefix == NULL) {
@@ -175,7 +176,14 @@ int list_sort(node_t *head) {
                 next = next->next;
 
                 if (should_mid_sleep) {
+                    if (unlock_node_mutex(prev) != 0) return -1;
+                    if (unlock_node_mutex(cur) != 0) return -1;
                     sleep(MID_SORT_WAIT_SECONDS);
+                    if (lock_node_mutex(prev) != 0) return -1;
+                    cur = prev->next;
+                    if (cur == NULL) break;
+                    if (lock_node_mutex(cur) != 0) return -1;
+                    next = cur->next;
                 }
             }
 
@@ -226,10 +234,13 @@ void *interval_list_sorting(void *param) {
         sleep(sleep_time);
 
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+        pthread_mutex_lock(&sleep_mutex);
         if (list_sort(global_list_head) == -1) {
             fprintf(stderr, "Sorting thread encountered error. Sorting stopped.\n");
+            pthread_mutex_unlock(&sleep_mutex);
             break;
         }
+        pthread_mutex_unlock(&sleep_mutex);
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     }
 
