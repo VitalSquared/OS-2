@@ -178,6 +178,24 @@ int list_sort(node_t *head) {
 
                     cur = next;
                     next = cur->next;
+
+                    if (should_mid_sleep) {
+                        if (unlock_node_rwlock(prev) != 0) return -1;
+                        if (unlock_node_rwlock(cur) != 0) return -1;
+                        if (unlock_node_rwlock(next) != 0) return -1;
+
+                        sleep(MID_SORT_WAIT_SECONDS);
+
+                        if (write_lock_node_rwlock(prev) != 0) return -1;
+
+                        cur = prev->next;
+                        if (cur == NULL) break;
+                        if (write_lock_node_rwlock(cur) != 0) return -1;
+
+                        next = cur->next;
+                        if (next == NULL) break;
+                        if (write_lock_node_rwlock(next) != 0) return -1;
+                    }
                 }
 
                 if (unlock_node_rwlock(prev) != 0) return -1;
@@ -185,21 +203,6 @@ int list_sort(node_t *head) {
                 prev = cur;
                 cur = next;
                 next = next->next;
-
-                if (should_mid_sleep) {
-                    if (unlock_node_rwlock(prev) != 0) return -1;
-                    if (unlock_node_rwlock(cur) != 0) return -1;
-
-                    sleep(MID_SORT_WAIT_SECONDS);
-
-                    if (write_lock_node_rwlock(prev) != 0) return -1;
-
-                    cur = prev->next;
-                    if (cur == NULL) break;
-                    if (write_lock_node_rwlock(cur) != 0) return -1;
-
-                    next = cur->next;
-                }
             }
 
             if (unlock_node_rwlock(cur) != 0) return -1;
