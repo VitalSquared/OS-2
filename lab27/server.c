@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <errno.h>
+#include <pthread.h>
 
 #define LOG 1
 #define BUF_SIZE 4096
@@ -34,7 +35,7 @@
 #define TRUE 1
 #define FALSE 0
 
-typedef struct list_node {
+typedef struct client {
     int client_sock_fd, remote_sock_fd;
 
     ssize_t client_size, client_offset, client_status;
@@ -43,19 +44,27 @@ typedef struct list_node {
     ssize_t remote_size, remote_offset, remote_status;
     char remote_read_data[BUF_SIZE];
 
-    struct list_node *prev, *next;
-} list_node_t;
+    struct client *prev, *next;
+} client_t;
 
 typedef struct list {
-    list_node_t *head;
+    client_t *head;
 } list_t;
 
 int listen_fd;
 int should_work = TRUE;
-int select_max_fd = 0;
-fd_set readfds, writefds;
 struct sockaddr_in remote_addr;
-list_t clients_list = { .head = NULL };
+
+void print_error(const char *prefix, int code) {
+    if (prefix == NULL) {
+        prefix = "error";
+    }
+    char buf[256];
+    if (strerror_r(code, buf, sizeof(buf)) != 0) {
+        strcpy(buf, "(unable to generate error!)");
+    }
+    fprintf(stderr, "%s: %s\n", prefix, buf);
+}
 
 void sigint_handler(int sig) {
     if (sig == SIGINT) {
@@ -70,24 +79,6 @@ int init_signals() {
         return -1;
     }
     return 0;
-}
-
-void list_add(list_node_t *node) {
-    node->prev = NULL;
-    node->next = clients_list.head;
-    clients_list.head = node;
-    if (node->next != NULL) node->next->prev = node;
-}
-
-void list_remove(list_node_t *node) {
-    if (node == clients_list.head) {
-        clients_list.head = node->next;
-        if (clients_list.head != NULL) clients_list.head->prev = NULL;
-    }
-    else {
-        node->prev->next = node->next;
-        if (node->next != NULL) node->next->prev = node->prev;
-    }
 }
 
 int open_listen_socket(int port) {
@@ -116,7 +107,6 @@ int open_listen_socket(int port) {
         return -1;
     }
 
-    select_max_fd = MAX(select_max_fd, sock_fd);
     return sock_fd;
 }
 
@@ -165,8 +155,8 @@ int open_remote_socket() {
     return sock_fd;
 }
 
-list_node_t *create_client(int client_sock_fd) {
-    list_node_t *client = (list_node_t *)calloc(1, sizeof(list_node_t));
+client_t *create_client(int client_sock_fd) {
+    client_t *client = (client_t *)calloc(1, sizeof(client_t));
     if (client == NULL) {
         perror("Unable to allocate memory for client");
         close(client_sock_fd);
@@ -184,16 +174,11 @@ list_node_t *create_client(int client_sock_fd) {
     client->remote_status = SOCK_OK;
 
     if (LOG) printf("New client %d connected\n", client_sock_fd);
-
-    select_max_fd = MAX(select_max_fd, client->client_sock_fd);
-    select_max_fd = MAX(select_max_fd, client->remote_sock_fd);
     
     return client;
 }
 
-void remove_client(list_node_t *client) {
-    list_remove(client);
-
+void remove_client(client_t *client) {
     if (LOG) printf("Client %d disconnected\n", client->client_sock_fd);
 
     close(client->client_sock_fd);
@@ -202,51 +187,34 @@ void remove_client(list_node_t *client) {
     free(client);
 }
 
-void remove_all_clients() {
-    list_node_t *cur = clients_list.head;
-    while (cur != NULL) {
-        list_node_t *next = cur->next;
-        remove_client(cur);
-        cur = next;
+int init_select_masks(fd_set *readfds, fd_set *writefds, client_t *client) {
+    FD_ZERO(readfds);
+    FD_ZERO(writefds);
+    
+    if (IS_CLIENT_INADEQUATE(client)) {
+        return -1;
     }
+
+    if (client->client_size == 0 && client->client_status == SOCK_OK) {
+        FD_SET(client->client_sock_fd, readfds);
+        client->client_offset = 0;
+    }
+    if (client->remote_size == 0 && client->remote_status == SOCK_OK) {
+        FD_SET(client->remote_sock_fd, readfds);
+        client->remote_offset = 0;
+    }
+    if (client->client_size > 0 && client->remote_status == SOCK_OK) {
+        FD_SET(client->remote_sock_fd, writefds);
+    }
+    if (client->remote_size > 0 && client->client_status == SOCK_OK) {
+        FD_SET(client->client_sock_fd, writefds);
+    }
+
+    return 0;
 }
 
-void init_select_masks() {
-    FD_ZERO(&readfds);
-    FD_ZERO(&writefds);
-    FD_SET(listen_fd, &readfds);
-
-    list_node_t *cur = clients_list.head;
-    while (cur != NULL) {
-        list_node_t *next = cur->next;
-
-        if (IS_CLIENT_INADEQUATE(cur)) {
-            remove_client(cur);
-            cur = next;
-            continue;
-        }
-
-        if (cur->client_size == 0 && cur->client_status == SOCK_OK) {
-            FD_SET(cur->client_sock_fd, &readfds);
-            cur->client_offset = 0;
-        }
-        if (cur->remote_size == 0 && cur->remote_status == SOCK_OK) {
-            FD_SET(cur->remote_sock_fd, &readfds);
-            cur->remote_offset = 0;
-        }
-        if (cur->client_size > 0 && cur->remote_status == SOCK_OK) {
-            FD_SET(cur->remote_sock_fd, &writefds);
-        }
-        if (cur->remote_size > 0 && cur->client_status == SOCK_OK) {
-            FD_SET(cur->client_sock_fd, &writefds);
-        }
-
-        cur = next;
-    }
-}
-
-void update_read_from_client(list_node_t *client) {
-    if (client->client_size == 0 && client->client_status == SOCK_OK && FD_ISSET(client->client_sock_fd, &readfds)) {
+void update_read_from_client(fd_set *readfds, client_t *client) {
+    if (client->client_size == 0 && client->client_status == SOCK_OK && FD_ISSET(client->client_sock_fd, readfds)) {
         client->client_size = read(client->client_sock_fd, client->client_read_data, BUF_SIZE);
 
         if (client->client_size == -1) {
@@ -259,8 +227,8 @@ void update_read_from_client(list_node_t *client) {
     }
 }
 
-void update_read_from_remote(list_node_t *client) {
-    if (client->remote_size == 0 && client->remote_status == SOCK_OK && FD_ISSET(client->remote_sock_fd, &readfds)) {
+void update_read_from_remote(fd_set *readfds, client_t *client) {
+    if (client->remote_size == 0 && client->remote_status == SOCK_OK && FD_ISSET(client->remote_sock_fd, readfds)) {
         client->remote_size = read(client->remote_sock_fd, client->remote_read_data, BUF_SIZE);
 
         if (client->remote_size == -1) {
@@ -273,8 +241,8 @@ void update_read_from_remote(list_node_t *client) {
     }
 }
 
-void update_write_to_remote(list_node_t *client) {
-    if (client->client_size > 0 && client->remote_status == SOCK_OK && FD_ISSET(client->remote_sock_fd, &writefds)) {
+void update_write_to_remote(fd_set *writefds, client_t *client) {
+    if (client->client_size > 0 && client->remote_status == SOCK_OK && FD_ISSET(client->remote_sock_fd, writefds)) {
         ssize_t bytes_written = write(client->remote_sock_fd, client->client_read_data + client->client_offset, client->client_size);
 
         if (bytes_written == -1) {
@@ -288,8 +256,8 @@ void update_write_to_remote(list_node_t *client) {
     }
 }
 
-void update_write_to_client(list_node_t *client) {
-    if (client->remote_size > 0 && client->client_status == SOCK_OK && FD_SET(client->client_sock_fd, &writefds)) {
+void update_write_to_client(fd_set *writefds, client_t *client) {
+    if (client->remote_size > 0 && client->client_status == SOCK_OK && FD_SET(client->client_sock_fd, writefds)) {
         ssize_t bytes_written = write(client->client_sock_fd, client->remote_read_data + client->remote_offset, client->remote_size);
 
         if (bytes_written == -1) {
@@ -303,35 +271,20 @@ void update_write_to_client(list_node_t *client) {
     }
 }
 
-void update_clients() {
-    list_node_t *cur = clients_list.head;
-    while (cur != NULL) {
-        update_read_from_client(cur);
-        update_read_from_remote(cur);
-        update_write_to_remote(cur);
-        update_write_to_client(cur);
-        cur = cur->next;
+void *client_spin(void *param) {
+    client_t *client = (client_t *)param;
+    if (client == NULL) {
+        fprintf(stderr, "client_spin: NULL param\n");
+        return NULL;
     }
-}
 
-int check_accept() {
-    if (FD_ISSET(listen_fd, &readfds)) {
-        int client_sock_fd = accept(listen_fd, NULL, NULL);
-        if (client_sock_fd == -1) {
-            perror("accept error");
-            return -1;
-        }
-        list_node_t *node = create_client(client_sock_fd);
-        if (node != NULL) list_add(node);
-    }
-    return 0;
-}
-
-void server_spin() {
+    fd_set readfds, writefds;
     while (should_work) {
-        init_select_masks();
+        if (init_select_masks(&readfds, &writefds, client) == -1) {
+            break;
+        }
 
-        int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
+        int num_fds_ready = select(MAX(client->client_sock_fd, client->remote_sock_fd) + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
             perror("select error");
             break;
@@ -340,8 +293,35 @@ void server_spin() {
             continue;
         }
 
-        update_clients();
-        if (check_accept() == -1) break;
+        update_read_from_client(&readfds, client);
+        update_read_from_remote(&readfds, client);
+        update_write_to_remote(&writefds, client);
+        update_write_to_client(&writefds, client);
+    }
+
+    remove_client(client);
+    return NULL;
+}
+
+void server_spin() {
+    while (should_work) {
+        int client_sock_fd = accept(listen_fd, NULL, NULL);
+        if (client_sock_fd == -1) {
+            perror("accept error");
+            break;
+        }
+
+        client_t *client = create_client(client_sock_fd);
+        if (client != NULL) {
+            pthread_t thread;
+            int error_code = pthread_create(&thread, NULL, client_spin, client);
+            if (error_code != 0) {
+                print_error("Unable to create thread", error_code);
+                remove_client(client);
+                break;
+            }
+            pthread_detach(thread);
+        }
     }
 }
 
@@ -402,6 +382,5 @@ int main(int argc, char **argv) {
 
     server_spin();
 
-    remove_all_clients();
-    return EXIT_SUCCESS;
+    pthread_exit(NULL);
 }

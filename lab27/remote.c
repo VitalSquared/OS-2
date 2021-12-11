@@ -33,7 +33,7 @@
 #define IS_PORT_VALID(port) (0 < (port) && (port) <= 0xFFFF)
 #define IS_NUM_OF_CLIENTS_VALID(n) (0 < (n) && (n) <= 512)
 
-#define IS_CLIENT_INADEQUATE(client) ((client)->sock_status != SOCK_OK || (client)->file_status != FILE_OK)
+#define IS_CLIENT_INADEQUATE(client) ((client)->sock_status != SOCK_OK || (client)->file_status == FILE_ERROR)
 
 #define TRUE 1
 #define FALSE 0
