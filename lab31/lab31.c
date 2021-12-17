@@ -23,31 +23,36 @@
 #define NO_DATA_CUSTOM 7
 #define UNKNOWN_ERROR 8
 
-#define GETTING_FROM_CACHE 2
+#define GETTING_FROM_CACHE 2    //only for client
 #define DOWNLOADING 1
 #define AWAITING_REQUEST 0
 #define SOCK_ERROR (-1)
 #define SOCK_DONE (-2)
 #define NON_SOCK_ERROR (-3)
 
+#define HTTP_CODE_UNDEFINED (-1)
+#define HTTP_CODE_NONE 0
+
 #define TRUE 1
 #define FALSE 0
-#define LOG TRUE
+
+#define INFO_LOG TRUE
+#define ERROR_LOG TRUE
 
 #define STR_EQ(STR1, STR2) (strcmp(STR1, STR2) == 0)
 #define IS_PORT_VALID(PORT) (0 < (PORT) && (PORT) <= 0xFFFF)
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
 const char *client_error_list[] = {
-        "HTTP/1.1 200 OK\nContent-Length: 49\nContent-Type: text/html\n<html><body>Internal error occurred</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 45\nContent-Type: text/html\n<html><body>Unable to load page</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 41\nContent-Type: text/html\n<html><body>Invalid request</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 51\nContent-Type: text/html\n<html><body>Only GET method supported</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 40\nContent-Type: text/html\n<html><body>Host not found</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 43\nContent-Type: text/html\n<html><body>Non-authoritative</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 41\nContent-Type: text/html\n<html><body>Request Refused</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 44\nContent-Type: text/html\n<html><body>No address records</body></html>",
-        "HTTP/1.1 200 OK\nContent-Length: 39\nContent-Type: text/html\n<html><body>Unknown Error</body></html>",
+        "<html><body>Internal error occurred</body></html>",
+        "<html><body>Unable to load page</body></html>",
+        "<html><body>Invalid request</body></html>",
+        "<html><body>Only GET method supported</body></html>",
+        "<html><body>Host not found</body></html>",
+        "<html><body>Non-authoritative</body></html>",
+        "<html><body>Request Refused</body></html>",
+        "<html><body>No address records</body></html>",
+        "<html><body>Unknown Error</body></html>",
 };
 
 typedef struct http {
@@ -76,9 +81,11 @@ typedef struct http_list {
 } http_list_t;
 
 int listen_fd;
-int select_max_fd = STDIN_FILENO;
+cache_t cache;
+
 fd_set readfds, writefds;
-cache_t cache = { .head = NULL };
+int select_max_fd = STDIN_FILENO;
+
 client_list_t client_list = { .head = NULL };
 http_list_t http_list = { .head = NULL };
 
@@ -94,7 +101,7 @@ int strings_equal_by_length(const char *str1, size_t len1, const char *str2, siz
 int open_listen_socket(int port) {
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd == -1) {
-        perror("open_listen_socket: socket error");
+        if (ERROR_LOG) perror("open_listen_socket: socket error");
         return -1;
     }
 
@@ -106,13 +113,13 @@ int open_listen_socket(int port) {
     serv_addr.sin_port = htons(port);
 
     if (bind(sock_fd, (struct sockaddr *)&serv_addr, sizeof(struct sockaddr_in)) == -1) {
-        perror("open_listen_socket: bind error");
+        if (ERROR_LOG) perror("open_listen_socket: bind error");
         close(sock_fd);
         return -1;
     }
 
     if (listen(sock_fd, SOMAXCONN) == -1) {
-        perror("open_listen_socket: listen error");
+        if (ERROR_LOG) perror("open_listen_socket: listen error");
         close(sock_fd);
         return -1;
     }
@@ -136,7 +143,7 @@ int open_http_socket(const char *hostname, int port, int *out_error) {
     int err_code;
     struct hostent *server_host = getipnodebyname(hostname, AF_INET, 0, &err_code);
     if (server_host == NULL) {
-        fprintf(stderr, "Unable to connect to host %s: %s\n", hostname, get_host_error(err_code, out_error));
+        if (ERROR_LOG) fprintf(stderr, "Unable to connect to host %s: %s\n", hostname, get_host_error(err_code, out_error));
         return -1;
     }
 
@@ -151,13 +158,13 @@ int open_http_socket(const char *hostname, int port, int *out_error) {
 
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd == -1) {
-        perror("open_http_socket: socket error");
+        if (ERROR_LOG) perror("open_http_socket: socket error");
         *out_error = INTERNAL_ERROR;
         return -1;
     }
 
     if (connect(sock_fd, (struct sockaddr *) &addr, sizeof(struct sockaddr_in)) == -1) {
-        perror("open_http_socket: connect error");
+        if (ERROR_LOG) perror("open_http_socket: connect error");
         *out_error = CONNECTION_ERROR;
         return -1;
     }
@@ -165,33 +172,30 @@ int open_http_socket(const char *hostname, int port, int *out_error) {
     return sock_fd;
 }
 
-http_t *create_http(int sock_fd, char *request, char *host, char *path) {
-    http_t *new_http = (http_t *)malloc(sizeof(http_t));
+http_t *create_http(int sock_fd, char *request, ssize_t request_size, char *host, char *path) {
+    http_t *new_http = (http_t *)calloc(1, sizeof(http_t));
     if (new_http == NULL) {
-        perror("create_http: Unable to allocate memory for http struct");
+        if (ERROR_LOG) perror("create_http: Unable to allocate memory for http struct");
         return NULL;
     }
 
-    new_http->status = AWAITING_REQUEST;
-    new_http->clients = 1;  //we create http if there is a request, so we already have 1 client
-    new_http->data = NULL;
-    new_http->data_size = -1;
-    new_http->code = -1;
-    new_http->sock_fd = sock_fd;
-    new_http->request = request;
-    new_http->request_size = (ssize_t)strlen(request);
-    new_http->request_bytes_written = 0;
-    new_http->host = host;
-    new_http->path = path;
-    new_http->cache_entry = NULL;
-
+    //add http to list
     new_http->prev = NULL;
     new_http->next = http_list.head;
     http_list.head = new_http;
     if (new_http->next != NULL) new_http->next->prev = new_http;
 
-    if (LOG) printf("[%s%s] Connected\n", host, path);
+    //init http data
+    new_http->status = AWAITING_REQUEST;
+    new_http->clients = 1;  //we create http if there is a request, so we already have 1 client
+    new_http->data = NULL; new_http->data_size = 0;
+    new_http->code = HTTP_CODE_UNDEFINED;
+    new_http->sock_fd = sock_fd;
+    new_http->request = request; new_http->request_size = request_size; new_http->request_bytes_written = 0;
+    new_http->host = host; new_http->path = path;
+    new_http->cache_entry = NULL;
 
+    if (INFO_LOG) printf("[%s %s] Connected\n", host, path);
     return new_http;
 }
 
@@ -205,7 +209,7 @@ void remove_http(http_t *http) {
         if (http->next != NULL) http->next->prev = http->prev;
     }
 
-    if (LOG) printf("[%s%s] Disconnected\n", http->host, http->path);
+    if (INFO_LOG) printf("[%d %s %s] Disconnected\n", http->sock_fd, http->host, http->path);
 
     if (http->cache_entry == NULL) {
         free(http->data);
@@ -215,26 +219,22 @@ void remove_http(http_t *http) {
     free(http);
 }
 
-void create_client() {
-    int client_sock_fd = accept(listen_fd, NULL, NULL);
-    if (client_sock_fd == -1) {
-        perror("create_client: accept error");
-        return;
-    }
-
-    client_t *new_client = (client_t *)malloc(sizeof(client_t));
+void create_client(int client_sock_fd) {
+    client_t *new_client = (client_t *)calloc(1, sizeof(client_t));
     if (new_client == NULL) {
-        perror("create_client: Unable to allocate memory for client struct");
+        if (ERROR_LOG) perror("create_client: Unable to allocate memory for client struct");
         close(client_sock_fd);
         return;
     }
     select_max_fd = MAX(select_max_fd, client_sock_fd);
 
+    //add client to list
     new_client->prev = NULL;
     new_client->next = client_list.head;
     client_list.head = new_client;
     if (new_client->next != NULL) new_client->next->prev = new_client;
 
+    //init client data
     new_client->sock_fd = client_sock_fd;
     new_client->status = AWAITING_REQUEST;
     new_client->cache_entry = NULL;
@@ -243,7 +243,7 @@ void create_client() {
     new_client->request = NULL;
     new_client->request_size = 0;
 
-    if (LOG) printf("[%d] Connected\n", client_sock_fd);
+    if (INFO_LOG) printf("[%d] Connected\n", client_sock_fd);
 }
 
 void remove_client(client_t *client) {
@@ -256,12 +256,9 @@ void remove_client(client_t *client) {
         if (client->next != NULL) client->next->prev = client->prev;
     }
 
-    if (client->http_entry != NULL) {
-        client->http_entry->clients--;
-    }
+    if (INFO_LOG) printf("[%d] Disconnected\n", client->sock_fd);
 
-    if (LOG) printf("[%d] Disconnected\n", client->sock_fd);
-
+    if (client->http_entry != NULL) client->http_entry->clients--;
     close(client->sock_fd);
     free(client);
 }
@@ -283,6 +280,29 @@ void remove_all_connections() {
     }
 }
 
+void print_active_connections() {
+    client_t *cur_client = client_list.head;
+    while (cur_client != NULL) {
+        printf("[cli %d] status=%d\n", cur_client->sock_fd, cur_client->status);
+        if (cur_client->cache_entry != NULL) {
+            printf("- cache=%s %s, size=%zd, bytes_written=%zd\n", cur_client->cache_entry->host, cur_client->cache_entry->path, cur_client->cache_entry->size, cur_client->bytes_written);
+        }
+        if (cur_client->http_entry != NULL) {
+            printf("- http=%d %s %s, size=%zd, bytes_written=%zd\n", cur_client->http_entry->sock_fd, cur_client->http_entry->host, cur_client->http_entry->path, cur_client->http_entry->data_size, cur_client->bytes_written);
+        }
+        cur_client = cur_client->next;
+    }
+    printf("\n");
+    http_t *cur_http = http_list.head;
+    while (cur_http != NULL) {
+        printf("[http %d] status=%d, code=%d, clients=%d\n", cur_http->sock_fd, cur_http->status, cur_http->code, cur_http->clients);
+        if (cur_http->cache_entry != NULL) {
+            printf("- cache=%s %s, size=%zd\n", cur_http->cache_entry->host, cur_http->cache_entry->path, cur_http->cache_entry->size);
+        }
+        cur_http = cur_http->next;
+    }
+}
+
 int parse_client_request(client_t *client, char **host, char **path, ssize_t bytes_read) {
     const char *method, *phr_path;
     size_t method_len, path_len;
@@ -292,27 +312,25 @@ int parse_client_request(client_t *client, char **host, char **path, ssize_t byt
 
     int err_code = phr_parse_request(client->request, client->request_size, &method, &method_len, &phr_path, &path_len, &minor_version, headers, &num_headers, client->request_size - bytes_read);
     if (err_code == -1) {
-        fprintf(stderr, "parse_client_request: unable to parse request\n");
-        client->status = NON_SOCK_ERROR;
-        client->error = INVALID_REQUEST;
+        if (ERROR_LOG) fprintf(stderr, "parse_client_request: unable to parse request\n");
+        client->status = NON_SOCK_ERROR; client->error = INVALID_REQUEST;
+        client->bytes_written = 0;
         return -1;
     }
-    if (err_code == -2) {
-        return -2; //incomplete, read from client more
-    }
+    if (err_code == -2) return -2; //incomplete, read from client more
 
     if (!strings_equal_by_length(method, method_len, "GET", 3)) {
-        fprintf(stderr, "parse_client_request: not a GET method\n");
-        client->status = NON_SOCK_ERROR;
-        client->error = NOT_A_GET_METHOD;
+        if (ERROR_LOG) fprintf(stderr, "parse_client_request: not a GET method\n");
+        client->status = NON_SOCK_ERROR; client->error = NOT_A_GET_METHOD;
+        client->bytes_written = 0;
         return -1;
     }
 
     *path = (char *)calloc(path_len + 1, sizeof(char));
     if (*path == NULL) {
-        fprintf(stderr, "parse_client_request: unable to allocate memory for path\n");
-        client->status = NON_SOCK_ERROR;
-        client->error = INTERNAL_ERROR;
+        if (ERROR_LOG) fprintf(stderr, "parse_client_request: unable to allocate memory for path\n");
+        client->status = NON_SOCK_ERROR; client->error = INTERNAL_ERROR;
+        client->bytes_written = 0;
         return -1;
     }
     memcpy(*path, phr_path, path_len);
@@ -322,11 +340,10 @@ int parse_client_request(client_t *client, char **host, char **path, ssize_t byt
         if (strings_equal_by_length(headers[i].name, headers[i].name_len,  "Host", 4)) {
             *host = calloc(headers[i].value_len + 1, sizeof(char));
             if (*host == NULL) {
-                fprintf(stderr, "parse_client_request: unable to allocate memory for host\n");
-                free(*path);
-                *path = NULL;
-                client->status = NON_SOCK_ERROR;
-                client->error = INTERNAL_ERROR;
+                if (ERROR_LOG) fprintf(stderr, "parse_client_request: unable to allocate memory for host\n");
+                free(*path); *path = NULL;
+                client->status = NON_SOCK_ERROR; client->error = INTERNAL_ERROR;
+                client->bytes_written = 0;
                 return -1;
             }
             memcpy(*host, headers[i].value, headers[i].value_len);
@@ -335,11 +352,10 @@ int parse_client_request(client_t *client, char **host, char **path, ssize_t byt
         }
     }
     if (!found_host) {
-        fprintf(stderr, "parse_client_request: no host header\n");
-        free(*path);
-        *path = NULL;
-        client->status = NON_SOCK_ERROR;
-        client->error = INVALID_REQUEST;
+        if (ERROR_LOG) fprintf(stderr, "parse_client_request: no host header\n");
+        free(*path); *path = NULL;
+        client->status = NON_SOCK_ERROR; client->error = INVALID_REQUEST;
+        client->bytes_written = 0;
         return -1;
     }
 
@@ -348,103 +364,152 @@ int parse_client_request(client_t *client, char **host, char **path, ssize_t byt
 
 void handle_client_request(client_t *client, ssize_t bytes_read) {
     char *host = NULL, *path = NULL;
-    if (parse_client_request(client, &host, &path, bytes_read) != 0) {
+    int err_code = parse_client_request(client, &host, &path, bytes_read);
+    if (err_code == -1) {
+        client->request_size = 0;
+        free(client->request); client->request = NULL;
         return;
     }
+    if (err_code == -2) return;
 
     cache_entry_t *entry = cache_find(host, path, &cache);
     if (entry != NULL) {
-        if (LOG) printf("[%d] Getting data from cache for '%s%s'\n", client->sock_fd, host, path);
+        if (INFO_LOG) printf("[%d] Getting data from cache for '%s%s'\n", client->sock_fd, host, path);
         client->status = GETTING_FROM_CACHE;
         client->cache_entry = entry;
-        client->http_entry = NULL;
-        free(client->request);
-        free(host); free(path);
-        client->request = NULL;
         client->request_size = 0;
+        free(client->request); client->request = NULL;
+        free(host); free(path);
         return;
     }
 
     //there is no entry in cache:
     http_t *http_entry = http_list.head;
     while (http_entry != NULL) {    //we look for already existing http connection with the same request
-        if (STR_EQ(http_entry->host, host) && STR_EQ(http_entry->path, path)) {
+        if (STR_EQ(http_entry->host, host) && STR_EQ(http_entry->path, path) &&
+            (http_entry->status == DOWNLOADING || http_entry->status == SOCK_DONE)) {
             break;
         }
         http_entry = http_entry->next;
     }
 
     if (http_entry != NULL) {   //there is active http entry with the same request
-        free(client->request);
-        client->request = NULL;
         client->request_size = 0;
+        free(client->request); client->request = NULL;
         http_entry->clients++;
     }
     else {  //no active http entry with the same request
-        int err_code = 0;
         int http_sock_fd = open_http_socket(host, 80, &err_code);
         if (http_sock_fd == -1) {
-            client->status = NON_SOCK_ERROR;
-            client->error = err_code;
-            free(client->request);
-            free(host); free(path);
-            client->request = NULL;
+            client->status = NON_SOCK_ERROR; client->error = err_code;
+            client->bytes_written = 0;
             client->request_size = 0;
+            free(client->request); client->request = NULL;
+            free(host); free(path);
             return;
         }
 
-        http_entry = create_http(http_sock_fd, client->request, host, path);
+        http_entry = create_http(http_sock_fd, client->request, client->request_size, host, path);
         if (http_entry == NULL) {
-            client->status = NON_SOCK_ERROR;
-            client->error = INTERNAL_ERROR;
-            free(client->request);
-            free(host); free(path);
-            client->request = NULL;
+            client->status = NON_SOCK_ERROR; client->error = INTERNAL_ERROR;
+            client->bytes_written = 0;
             client->request_size = 0;
+            free(client->request); client->request = NULL;
+            free(host); free(path);
             close(http_sock_fd);
             return;
         }
 
         select_max_fd = MAX(select_max_fd, http_sock_fd);
+        client->request_size = 0;
+        client->request = NULL;
     }
 
     client->status = DOWNLOADING;
     client->http_entry = http_entry;
-    client->cache_entry = NULL;
-    if (LOG) printf("[%d] No data in cache for '%s%s'.\n", client->sock_fd, host, path);
+    if (INFO_LOG) printf("[%d] No data in cache for '%s %s'.\n", client->sock_fd, host, path);
 }
 
 void read_data_from_client(client_t *client) {
-    int sock_fd = client->sock_fd;
-    char *check = (char *)realloc(client->request, client->request_size + BUF_SIZE + 1);
-    if (check == NULL) {
-        perror("read_data_from_client: Unable to reallocate memory for client request");
-        client->status = NON_SOCK_ERROR;
-        client->error = INTERNAL_ERROR;
-        return;
-    }
-    client->request = check;
-
-    ssize_t bytes_read = read(sock_fd, client->request + client->request_size, BUF_SIZE);
+    char buf[BUF_SIZE + 1];
+    ssize_t bytes_read = read(client->sock_fd, buf, BUF_SIZE);
     if (bytes_read == -1) {
-        perror("read_data_from_client: Unable to read from client socket");
+        if (ERROR_LOG) perror("read_data_from_client: Unable to read from client socket");
         client->status = SOCK_ERROR;
+        client->request_size = 0;
+        free(client->request);  client->request = NULL;
         return;
     }
-    if (bytes_read == 0) {  //client disconnected on other end
+    if (bytes_read == 0) {
         client->status = SOCK_DONE;
+        client->request_size = 0;
+        free(client->request);  client->request = NULL;
         return;
     }
 
+    if (client->status != AWAITING_REQUEST) {
+        if ((client->status == DOWNLOADING && client->bytes_written == client->http_entry->data_size) ||
+            (client->status == GETTING_FROM_CACHE && client->bytes_written == client->cache_entry->size)) {
+            if (client->http_entry != NULL) {
+                client->http_entry->clients--;
+                client->http_entry = NULL;
+            }
+            client->bytes_written = 0;
+            client->status = AWAITING_REQUEST;
+            client->request_size = 0;
+            free(client->request);  client->request = NULL;
+        }
+        else {
+            if (ERROR_LOG) fprintf(stderr, "read_data_from_client: client read data when we shouldn't\n");
+            if (INFO_LOG) {
+                buf[bytes_read] = '\n';
+                write(STDERR_FILENO, buf, bytes_read + 1);
+            }
+            return;
+        }
+    }
+
+    char *check = (char *)realloc(client->request, client->request_size + BUF_SIZE);
+    if (check == NULL) {
+        if (ERROR_LOG) perror("read_data_from_client: Unable to reallocate memory for client request");
+        client->status = NON_SOCK_ERROR; client->error = INTERNAL_ERROR;
+        client->bytes_written = 0;
+        client->request_size = 0;
+        free(client->request);  client->request = NULL;
+        return;
+    }
+
+    client->request = check;
+    memcpy(client->request + client->request_size, buf, bytes_read);
     client->request_size += bytes_read;
-    client->request[client->request_size] = '\0';
 
     handle_client_request(client, bytes_read);
 }
 
-void write_to_client(client_t *client) {
-    int sock_fd = client->sock_fd;
+void check_finished_writing_to_client(client_t *client) {
+    size_t size = 0;
 
+    if (client->status == NON_SOCK_ERROR) size = (ssize_t)strlen(client_error_list[client->error]);
+    else if (client->status == GETTING_FROM_CACHE) size = client->cache_entry->size;
+    else if (client->status == DOWNLOADING) size = client->http_entry->data_size;
+
+    if (client->bytes_written >= size && (
+                (client->status == GETTING_FROM_CACHE && client->cache_entry->is_full) ||
+                (client->status == DOWNLOADING && client->http_entry->status == SOCK_DONE) ||
+                client->status == NON_SOCK_ERROR)) {
+        client->bytes_written = 0;
+
+        client->cache_entry = NULL;
+        if (client->http_entry != NULL) {
+            client->http_entry->clients--;
+            client->http_entry = NULL;
+        }
+
+        client->status = AWAITING_REQUEST;
+    }
+}
+
+void write_to_client(client_t *client) {
     ssize_t offset = client->bytes_written;
     const char *buf = "";
     ssize_t size = 0;
@@ -462,30 +527,15 @@ void write_to_client(client_t *client) {
         size = client->http_entry->data_size;
     }
 
-    ssize_t bytes_written = write(sock_fd, buf + offset, size - offset);
+    ssize_t bytes_written = write(client->sock_fd, buf + offset, size - offset);
     if (bytes_written == -1) {
-        perror("write_to_client: Unable to write to client socket");
+        if (ERROR_LOG) perror("write_to_client: Unable to write to client socket");
         client->status = SOCK_ERROR;
         return;
     }
-
     client->bytes_written += bytes_written;
 
-    if (client->bytes_written == size && (
-                (client->status == GETTING_FROM_CACHE && client->cache_entry->is_full) ||
-                (client->status == DOWNLOADING && client->http_entry->status == SOCK_DONE) ||
-                client->status == NON_SOCK_ERROR
-        )) {
-        client->bytes_written = 0;
-
-        if (client->status == DOWNLOADING) {
-            client->http_entry->clients--;
-            client->http_entry = NULL;
-        }
-
-        client->status = AWAITING_REQUEST;
-        client->cache_entry = NULL;
-    }
+    check_finished_writing_to_client(client);
 }
 
 void get_http_response_code(http_t *entry, ssize_t bytes_read) {
@@ -495,16 +545,16 @@ void get_http_response_code(http_t *entry, ssize_t bytes_read) {
     struct phr_header headers[100];
     size_t num_headers = sizeof(headers) / sizeof(headers[0]);
 
-    if (entry->code == -1) {
+    if (entry->code == HTTP_CODE_UNDEFINED) {
         int err_code = phr_parse_response(entry->data, entry->data_size, &minor_version, &status, &msg, &msg_len, headers, &num_headers, entry->data_size - bytes_read);
-        if (err_code == -1) entry->code = 0;
-        else if (status != 0) entry->code = status;
+        if (err_code == -1) entry->code = HTTP_CODE_NONE;
+        else if (err_code != -2) entry->code = status;
     }
 
     if (entry->code == 200) {
         if (entry->cache_entry == NULL) {
             entry->cache_entry = cache_add(entry->host, entry->path, entry->data, entry->data_size, &cache);
-            if (entry->cache_entry == NULL) entry->code = 0;
+            if (entry->cache_entry == NULL) entry->code = HTTP_CODE_NONE;
         }
         else {
             entry->cache_entry->data = entry->data;
@@ -514,46 +564,54 @@ void get_http_response_code(http_t *entry, ssize_t bytes_read) {
 }
 
 void read_http_data(http_t *entry) {
-    int sock_fd = entry->sock_fd;
-
-    char *check = (char *)realloc(entry->data, entry->data_size + BUF_SIZE);
-    if (check == NULL) {
-        perror("read_http_data: Unable to reallocate memory for http data");
-        entry->status = NON_SOCK_ERROR;
-        entry->error = INTERNAL_ERROR;
-        close(entry->sock_fd);
-        free(entry->data);
-        entry->data_size = 0;
-        if (entry->cache_entry != NULL) {
-            cache_remove(entry->cache_entry, &cache);
-            entry->cache_entry = NULL;
-        }
-        return;
-    }
-    entry->data = check;
-
-    ssize_t bytes_read = read(sock_fd, entry->data + entry->data_size, BUF_SIZE);
+    char buf[BUF_SIZE];
+    ssize_t bytes_read = read(entry->sock_fd, buf, BUF_SIZE);//entry->data + entry->data_size, BUF_SIZE);
     if (bytes_read == -1) {
-        perror("read_http_data: Unable to read from http socket");
+        if (ERROR_LOG) perror("read_http_data: Unable to read from http socket");
         entry->status = SOCK_ERROR;
         close(entry->sock_fd);
-        free(entry->data);
         entry->data_size = 0;
         if (entry->cache_entry != NULL) {
             cache_remove(entry->cache_entry, &cache);
             entry->cache_entry = NULL;
         }
+        else free(entry->data);
+        entry->data = NULL;
         return;
     }
-
-    entry->data_size += bytes_read;
-    get_http_response_code(entry, bytes_read);
-
     if (bytes_read == 0) {
         entry->status = SOCK_DONE;
         close(entry->sock_fd);
         if (entry->cache_entry != NULL) entry->cache_entry->is_full = TRUE;
+        return;
     }
+
+    if (entry->status != DOWNLOADING) {
+        if (ERROR_LOG) fprintf(stderr, "read_http_data: reading from http when we shouldn't\n");
+        if (INFO_LOG) write(STDERR_FILENO, buf, bytes_read);
+        return;
+    }
+
+    char *check = (char *)realloc(entry->data, entry->data_size + BUF_SIZE);
+    if (check == NULL) {
+        if (ERROR_LOG) perror("read_http_data: Unable to reallocate memory for http data");
+        entry->status = NON_SOCK_ERROR; entry->error = INTERNAL_ERROR;
+        close(entry->sock_fd);
+        entry->data_size = 0;
+        if (entry->cache_entry != NULL) {
+            cache_remove(entry->cache_entry, &cache);
+            entry->cache_entry = NULL;
+        }
+        else free(entry->data);
+        entry->data = NULL;
+        return;
+    }
+
+    entry->data = check;
+    memcpy(entry->data + entry->data_size, buf, bytes_read);
+    entry->data_size += bytes_read;
+
+    get_http_response_code(entry, bytes_read);
 }
 
 void send_http_request(http_t *entry) {
@@ -563,19 +621,16 @@ void send_http_request(http_t *entry) {
 
     if (entry->request_bytes_written == entry->request_size) {
         entry->status = DOWNLOADING;
-        entry->data_size = 0;
-        free(entry->request);
-        entry->request = NULL;
         entry->request_size = 0;
+        free(entry->request); entry->request = NULL;
     }
 
     if (bytes_written == -1) {
-        perror("send_http_request: unable to write to http socket");
+        if (ERROR_LOG) perror("send_http_request: unable to write to http socket");
         entry->status = SOCK_ERROR;
         close(entry->sock_fd);
-        free(entry->request);
-        entry->request = NULL;
         entry->request_size = 0;
+        free(entry->request); entry->request = NULL;
     }
 }
 
@@ -589,18 +644,16 @@ void init_select_masks() {
     while (cur_client != NULL) {
         client_t *next = cur_client->next;
 
-        int sock_fd = cur_client->sock_fd;
-
-        if (cur_client->status == SOCK_ERROR || cur_client->status == SOCK_DONE) {
+        if (cur_client->status == SOCK_ERROR || cur_client->status == SOCK_DONE || cur_client->status == NON_SOCK_ERROR) {
             remove_client(cur_client);
             cur_client = next;
             continue;
         }
 
         if (cur_client->http_entry != NULL) {
-            if (cur_client->http_entry->status == NON_SOCK_ERROR) {
+            if (cur_client->http_entry->status == NON_SOCK_ERROR || cur_client->http_entry->status == SOCK_ERROR) {
                 cur_client->status = NON_SOCK_ERROR;
-                cur_client->error = cur_client->http_entry->error;
+                cur_client->error = cur_client->http_entry->status == SOCK_ERROR ? CONNECTION_ERROR : cur_client->http_entry->error;
                 cur_client->http_entry->clients--;
                 cur_client->http_entry = NULL;
                 cur_client->bytes_written = 0;
@@ -615,22 +668,15 @@ void init_select_masks() {
                 cur_client->http_entry->clients--;
                 cur_client->http_entry = NULL;
             }
-            else if (cur_client->http_entry->status == SOCK_ERROR) {
-                cur_client->status = NON_SOCK_ERROR;
-                cur_client->error = CONNECTION_ERROR;
-                cur_client->http_entry->clients--;
-                cur_client->http_entry = NULL;
-                cur_client->bytes_written = 0;
-            }
         }
+        check_finished_writing_to_client(cur_client);
 
-        if (cur_client->status == AWAITING_REQUEST) {
-            FD_SET(sock_fd, &readfds);
-        }
-        if ((cur_client->status == DOWNLOADING && cur_client->http_entry->status == DOWNLOADING && cur_client->bytes_written < cur_client->http_entry->data_size) ||
-            (cur_client->status == GETTING_FROM_CACHE && cur_client->cache_entry->size >= 0 && cur_client->bytes_written < cur_client->cache_entry->size) ||
+        FD_SET(cur_client->sock_fd, &readfds);
+
+        if ((cur_client->status == DOWNLOADING && cur_client->bytes_written < cur_client->http_entry->data_size) ||
+            (cur_client->status == GETTING_FROM_CACHE && cur_client->bytes_written < cur_client->cache_entry->size) ||
             cur_client->status == NON_SOCK_ERROR) {
-            FD_SET(sock_fd, &writefds);  //we need to write to client: 1) data from http, or 2) data from cache, or 3) error
+            FD_SET(cur_client->sock_fd, &writefds);  //we need to write to client: 1) data from http, or 2) data from cache, or 3) error
         }
 
         cur_client = next;
@@ -641,30 +687,30 @@ void init_select_masks() {
         http_t *next = cur_http->next;
 
         if (cur_http->clients == 0) {
-            if (cur_http->status == SOCK_ERROR || cur_http->status == SOCK_DONE) {
+            if (cur_http->status == SOCK_ERROR || cur_http->status == SOCK_DONE || cur_http->status == NON_SOCK_ERROR) {
                 remove_http(cur_http);
                 cur_http = next;
                 continue;
             }
             #ifdef DROP_HTTP_NO_CLIENTS
-                if (cur_http->cache_entry != NULL && !cur_http->cache_entry->is_full) {
-                    cache_remove(cur_http->cache_entry, &cache);
-                    cur_http->cache_entry = NULL;
-                }
-                if (cur_http->status == DOWNLOADING) {
-                    close(cur_http->sock_fd);
-                }
-                remove_http(cur_http);
-                cur_http = next;
-                continue;
+            if (cur_http->cache_entry != NULL && !cur_http->cache_entry->is_full) {
+                cache_remove(cur_http->cache_entry, &cache);
+                cur_http->cache_entry = NULL;
+            }
+            if (cur_http->status == DOWNLOADING) {
+                close(cur_http->sock_fd);
+            }
+            remove_http(cur_http);
+            cur_http = next;
+            continue;
             #endif
         }
 
+        if (cur_http->status != SOCK_ERROR && cur_http->status != SOCK_DONE && cur_http->status != NON_SOCK_ERROR) {
+            FD_SET(cur_http->sock_fd, &readfds);
+        }
         if (cur_http->status == AWAITING_REQUEST) {
             FD_SET(cur_http->sock_fd, &writefds);
-        }
-        if (cur_http->status == DOWNLOADING) {
-            FD_SET(cur_http->sock_fd, &readfds);
         }
 
         cur_http = next;
@@ -672,12 +718,10 @@ void init_select_masks() {
 }
 
 void update_connections() {
-    if (FD_ISSET(listen_fd, &readfds)) create_client();
-
     client_t *cur_client = client_list.head;
     while (cur_client != NULL) {
         client_t *next = cur_client->next;
-        if (cur_client->status == AWAITING_REQUEST && FD_ISSET(cur_client->sock_fd, &readfds)) {
+        if (cur_client->status != SOCK_ERROR && cur_client->status != SOCK_DONE && FD_ISSET(cur_client->sock_fd, &readfds)) {
             read_data_from_client(cur_client);
         }
         if (((cur_client->status == DOWNLOADING && cur_client->http_entry->status == DOWNLOADING && cur_client->bytes_written < cur_client->http_entry->data_size) ||
@@ -691,13 +735,24 @@ void update_connections() {
     http_t *cur_http = http_list.head;
     while (cur_http != NULL) {
         http_t *next = cur_http->next;
+        if (cur_http->status != SOCK_ERROR && cur_http->status != SOCK_DONE && cur_http->status != NON_SOCK_ERROR && FD_ISSET(cur_http->sock_fd, &readfds)) {
+            read_http_data(cur_http);
+        }
         if (cur_http->status == AWAITING_REQUEST && FD_ISSET(cur_http->sock_fd, &writefds)) {
             send_http_request(cur_http);
         }
-        if (cur_http->status == DOWNLOADING && FD_ISSET(cur_http->sock_fd, &readfds)) {
-            read_http_data(cur_http);
-        }
         cur_http = next;
+    }
+}
+
+void update_accept() {
+    if (FD_ISSET(listen_fd, &readfds)) {
+        int client_sock_fd = accept(listen_fd, NULL, NULL);
+        if (client_sock_fd == -1) {
+            if (ERROR_LOG) perror("create_client: accept error");
+            return;
+        }
+        create_client(client_sock_fd);
     }
 }
 
@@ -706,13 +761,15 @@ int update_stdin() {
         char buf[BUF_SIZE + 1];
         ssize_t bytes_read = read(STDIN_FILENO, buf, BUF_SIZE);
         if (bytes_read == -1) {
-            perror("main: Unable to read from stdin");
+            if (ERROR_LOG)  perror("main: Unable to read from stdin");
             return -1;
         }
         buf[bytes_read] = '\0';
         if (buf[bytes_read - 1] == '\n') buf[bytes_read - 1] = '\0';
+
         if (STR_EQ(buf, "exit")) return -1;
         else if (STR_EQ(buf, "cache")) cache_print_content(&cache);
+        else if (STR_EQ(buf, "active")) print_active_connections();
     }
     return 0;
 }
@@ -723,12 +780,13 @@ void proxy_spin() {
 
         int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
-            perror("proxy_spin: select error");
+            if (ERROR_LOG) perror("proxy_spin: select error");
             break;
         }
         if (num_fds_ready == 0) continue;
 
         update_connections();
+        update_accept();
         if (update_stdin() == -1) break;
     }
 }
@@ -739,11 +797,11 @@ int convert_number(char *str, int *number) {
     long num = strtol(str, &endptr, 10);
 
     if (errno != 0) {
-        perror("Can't convert given number");
+        if (ERROR_LOG) perror("Can't convert given number");
         return -1;
     }
     if (strcmp(endptr, "") != 0) {
-        fprintf(stderr, "Number contains invalid symbols\n");
+        if (ERROR_LOG) fprintf(stderr, "Number contains invalid symbols\n");
         return -1;
     }
 
@@ -752,11 +810,9 @@ int convert_number(char *str, int *number) {
 }
 
 int parse_port(char *listen_port_str, int *listen_port) {
-    if (convert_number(listen_port_str, listen_port) == -1) {
-        return -1;
-    }
+    if (convert_number(listen_port_str, listen_port) == -1) return -1;
     if (!IS_PORT_VALID(*listen_port)) {
-        fprintf(stderr, "Invalid port: listen_port=%d\n", *listen_port);
+        if (ERROR_LOG) fprintf(stderr, "Invalid port: listen_port=%d\n", *listen_port);
         return -1;
     }
     return 0;
@@ -771,20 +827,21 @@ int main(int argc, char **argv) {
         perror("main: signal error");
         return EXIT_FAILURE;
     }
+    if (cache_init(&cache) != 0) {
+        fprintf(stderr, "Unable to init cache\n");
+        return EXIT_FAILURE;
+    }
 
     int port;
-    if (parse_port(argv[1], &port) == -1) {
-        return EXIT_FAILURE;
-    }
-
-    if ((listen_fd = open_listen_socket(port)) == -1) {
-        return EXIT_FAILURE;
-    }
+    if (parse_port(argv[1], &port) == -1) return EXIT_FAILURE;
+    if ((listen_fd = open_listen_socket(port)) == -1) return EXIT_FAILURE;
     select_max_fd = MAX(select_max_fd, listen_fd);
 
     proxy_spin();
+
     remove_all_connections();
     cache_destroy(&cache);
     close(listen_fd);
+
     return EXIT_SUCCESS;
 }

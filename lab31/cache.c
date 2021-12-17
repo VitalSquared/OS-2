@@ -7,6 +7,11 @@
 
 #define STR_EQ(STR1, STR2) (strcmp(STR1, STR2) == 0)
 
+int cache_init(cache_t *cache) {
+    cache->head = NULL;
+    return 0;
+}
+
 cache_entry_t *cache_add(char *host, char *path, char *data, ssize_t size, cache_t *cache) {
     cache_entry_t *node = (cache_entry_t *)malloc(sizeof(cache_entry_t));
     if (node == NULL) {
@@ -19,7 +24,6 @@ cache_entry_t *cache_add(char *host, char *path, char *data, ssize_t size, cache
     node->data = data;
     node->host = host;
     node->path = path;
-    node->next = NULL;
 
     node->prev = NULL;
     node->next = cache->head;
@@ -72,7 +76,7 @@ void cache_destroy(cache_t *cache) {
 void cache_print_content(cache_t *cache) {
     cache_entry_t *cur = cache->head;
     while (cur != NULL) {
-        printf("%s%s %zd\n", cur->host, cur->path, cur->size);
+        printf("%s %s %zd full=%d\n", cur->host, cur->path, cur->size, cur->is_full);
         cur = cur->next;
     }
 }
