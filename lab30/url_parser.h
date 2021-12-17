@@ -1,12 +1,9 @@
-
-#define URL_PORT_ERROR 0
-
 typedef struct url {
     char *full;
-    char *protocol;
+    char *scheme;
     char *user;
-    int port;
     char *hostname;
+    int port;
 } url_t;
 
 url_t *parse_url(const char *url_string, int default_port);

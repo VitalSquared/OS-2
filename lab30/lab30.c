@@ -8,11 +8,16 @@
 
 #define BUF_SIZE 4096
 #define MAX_NUM_OF_LINES 25
-#define MAX_BYTES_PER_LINE 200
+#define MAX_BYTES_PER_LINE 185
 
 #define IS_BUF_EMPTY(data) ((data)->buf_size == 0)
 #define IS_BUF_FULL(data) ((data)->buf_size == BUF_SIZE)
-#define IS_DATA_INADEQUATE(data) ((data)->sock_status == SOCK_ERROR || (data)->stdin_status == STREAM_ERROR || (data)->stdout_status == STREAM_ERROR)
+#define IS_DATA_INADEQUATE(data) ((data)->sock_status == SOCK_ERROR ||                \
+                                  (data)->stdin_status == STREAM_ERROR ||             \
+                                  (data)->stdout_status == STREAM_ERROR ||            \
+                                  (data)->mutex_cond_status == MUTEX_COND_ERROR)
+
+#define IS_PORT_VALID(PORT) (0 < (PORT) && (PORT) <= 0xFFFF)
 
 #define SOCK_OK (0)
 #define SOCK_ERROR (-1)
@@ -20,6 +25,9 @@
 
 #define STREAM_OK (0)
 #define STREAM_ERROR (-1)
+
+#define MUTEX_COND_OK (0)
+#define MUTEX_COND_ERROR (-1)
 
 #define TRUE 1
 #define FALSE 0
@@ -35,20 +43,62 @@ typedef struct data {
     char buf[BUF_SIZE];
     char stdin_buf[BUF_SIZE];
 
-    int both_threads_created, error_creating_threads;
-    pthread_mutex_t buf_mutex;
-    pthread_cond_t buf_cond;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int mutex_cond_status, both_threads_created, error_creating_threads;
 } data_t;
 
 void print_error(const char *prefix, int code) {
-    if (prefix == NULL) {
-        prefix = "error";
-    }
+    if (prefix == NULL) prefix = "error";
     char buf[256];
     if (strerror_r(code, buf, sizeof(buf)) != 0) {
         strcpy(buf, "(unable to generate error!)");
     }
     fprintf(stderr, "%s: %s\n", prefix, buf);
+}
+
+int lock_mutex(data_t *data) {
+    if (data == NULL) return 0;
+    int err_code = pthread_mutex_lock(&data->mutex);
+    if (err_code != 0) {
+        print_error("lock_mutex: Unable to lock mutex", err_code);
+        data->mutex_cond_status = MUTEX_COND_ERROR;
+        return err_code;
+    }
+    return 0;
+}
+
+int unlock_mutex(data_t *data) {
+    if (data == NULL) return 0;
+    int err_code = pthread_mutex_unlock(&data->mutex);
+    if (err_code != 0) {
+        print_error("unlock_mutex: Unable to unlock mutex", err_code);
+        data->mutex_cond_status = MUTEX_COND_ERROR;
+        return err_code;
+    }
+    return 0;
+}
+
+int wait_cond(data_t *data) {
+    if (data == NULL) return 0;
+    int err_code = pthread_cond_wait(&data->cond, &data->mutex);
+    if (err_code != 0) {
+        print_error("wait_cond: Unable to wait cond", err_code);
+        data->mutex_cond_status = MUTEX_COND_ERROR;
+        return err_code;
+    }
+    return 0;
+}
+
+int signal_cond(data_t *data) {
+    if (data == NULL) return 0;
+    int err_code = pthread_cond_signal(&data->cond);
+    if (err_code != 0) {
+        print_error("signal_cond: Unable to signal cond", err_code);
+        data->mutex_cond_status = MUTEX_COND_ERROR;
+        return err_code;
+    }
+    return 0;
 }
 
 const char *get_host_error(int err_code) {
@@ -82,12 +132,13 @@ int open_socket(char *hostname, int port) {
 
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd == -1) {
-        perror("socket error");
+        perror("open_socket: socket error");
         return -1;
     }
 
     if (connect(sock_fd, (struct sockaddr *) &addr, sizeof(struct sockaddr_in)) == -1) {
-        perror("connect error");
+        perror("open_socket: connect error");
+        close (sock_fd);
         return -1;
     }
 
@@ -95,29 +146,48 @@ int open_socket(char *hostname, int port) {
 }
 
 int send_get_request(int sock_fd, url_t *url) {
-    char buf[BUF_SIZE] = { 0 };
-    sprintf(buf, "GET %s HTTP/1.0\r\n\r\n", url->full);
+    const char *method = "GET";
+    const char *url_str = url->full;
+    const char *protocol = "HTTP/1.0";
 
-    ssize_t bytes_written = write(sock_fd, buf, strlen(buf));
-    if (bytes_written == -1) {
-        perror("Unable to write GET request to socket");
+    size_t method_len = strlen(method);
+    size_t url_len = strlen(url_str);
+    size_t protocol_len = strlen(protocol);
+    size_t total_len = method_len + 1 + url_len + 1 + protocol_len + 4;
+
+    char *buf = (char *)malloc(total_len + 1);
+    if (buf == NULL) {
+        perror("send_get_request: Can't allocate memory for request buf");
         return -1;
     }
+    sprintf(buf, "%s %s %s\r\n\r\n", method, url_str, protocol);
 
+    ssize_t total_written = 0;
+    while (total_written < total_len) {
+        ssize_t bytes_written = write(sock_fd, buf, total_len - total_written);
+        if (bytes_written == -1) {
+            perror("send_get_request: Unable to write GET request to socket");
+            free(buf);
+            return -1;
+        }
+        total_written += bytes_written;
+    }
+
+    free(buf);
     return 0;
 }
 
 int init_data(url_t *url, data_t *data) {
-    int err_code = pthread_mutex_init(&data->buf_mutex, NULL);
+    int err_code = pthread_mutex_init(&data->mutex, NULL);
     if (err_code != 0) {
-        print_error("Unable to init mutex", err_code);
+        print_error("init_data: Unable to init mutex", err_code);
         return -1;
     }
 
-    err_code = pthread_cond_init(&data->buf_cond, NULL);
+    err_code = pthread_cond_init(&data->cond, NULL);
     if (err_code != 0) {
-        print_error("Unable to init cond", err_code);
-        pthread_mutex_destroy(&data->buf_mutex);
+        print_error("init_data: Unable to init cond", err_code);
+        pthread_mutex_destroy(&data->mutex);
         return -1;
     }
 
@@ -135,20 +205,27 @@ int init_data(url_t *url, data_t *data) {
     data->sock_status = SOCK_OK;
     data->stdin_status = STREAM_OK;
     data->stdout_status = STREAM_OK;
+    data->mutex_cond_status = MUTEX_COND_OK;
     data->both_threads_created = FALSE;
     data->error_creating_threads = FALSE;
 
     return 0;
 }
 
+void destroy_data(data_t *data) {
+    pthread_mutex_destroy(&data->mutex);
+    pthread_cond_destroy(&data->cond);
+    close(data->sock_fd);
+}
+
 void read_from_socket(data_t *data) {
-    if (!IS_BUF_FULL(data) && data->sock_status == SOCK_OK) {
+    if (!IS_BUF_FULL(data) && data->sock_status == SOCK_OK && data->mutex_cond_status == MUTEX_COND_OK) {
         size_t buf_size = data->buf_size;
-        pthread_mutex_unlock(&data->buf_mutex);
+        if (unlock_mutex(data) != 0) return;
 
         ssize_t bytes_read = read(data->sock_fd, data->buf + buf_size, BUF_SIZE - buf_size);
 
-        pthread_mutex_lock(&data->buf_mutex);
+        if (lock_mutex(data) != 0) return;
         if (bytes_read == -1) {
             perror("Unable to read from socket");
             data->sock_status = SOCK_ERROR;
@@ -166,9 +243,9 @@ void read_from_socket(data_t *data) {
 }
 
 void write_to_stdout(data_t *data) {
-    if (!IS_BUF_EMPTY(data) && data->processed_lines < MAX_NUM_OF_LINES && data->stdout_status == STREAM_OK) {
+    if (!IS_BUF_EMPTY(data) && data->processed_lines < MAX_NUM_OF_LINES && data->stdout_status == STREAM_OK && data->mutex_cond_status == MUTEX_COND_OK) {
         size_t buf_size = data->buf_size;
-        pthread_mutex_unlock(&data->buf_mutex);
+        if (unlock_mutex(data) != 0) return;
 
         size_t output_length = 0;
         for (size_t i = 0; i < buf_size; i++) {
@@ -184,14 +261,13 @@ void write_to_stdout(data_t *data) {
         }
 
         ssize_t bytes_written = write(STDOUT_FILENO, data->buf, output_length);
+
+        if (lock_mutex(data) != 0) return;
         if (bytes_written == -1) {
             perror("Unable to write to STDOUT");
-            pthread_mutex_lock(&data->buf_mutex);
             data->stdout_status = STREAM_ERROR;
             return;
         }
-
-        pthread_mutex_lock(&data->buf_mutex);
         memmove(data->buf, data->buf + bytes_written, data->buf_size - bytes_written);
         data->buf_size -= bytes_written;
     }
@@ -199,14 +275,16 @@ void write_to_stdout(data_t *data) {
 
 void read_from_stdin(data_t *data) {
     if (data->processed_lines >= MAX_NUM_OF_LINES && data->stdin_status == STREAM_OK) {
-        pthread_mutex_unlock(&data->buf_mutex);
-        if (read(STDIN_FILENO, data->stdin_buf, BUF_SIZE) == -1) {
+        if (unlock_mutex(data) != 0) return;
+
+        ssize_t bytes_read = read(STDIN_FILENO, data->stdin_buf, BUF_SIZE);
+
+        if (lock_mutex(data) != 0) return;
+        if (bytes_read == -1) {
             perror("Unable to read from STDIN");
-            pthread_mutex_lock(&data->buf_mutex);
             data->stdin_status = STREAM_ERROR;
             return;
         }
-        pthread_mutex_lock(&data->buf_mutex);
         data->processed_lines = 0;
     }
 }
@@ -218,20 +296,20 @@ void *reader_thread(void *param) {
         return NULL;
     }
 
-    while (!data->both_threads_created && !data->error_creating_threads) {}
-    if (data->error_creating_threads) {
+    if (lock_mutex(data) != 0) return NULL;
+    if (!data->both_threads_created || data->error_creating_threads) {
+        unlock_mutex(data);
         return NULL;
     }
 
-    pthread_mutex_lock(&data->buf_mutex);
     while (!IS_DATA_INADEQUATE(data) && data->sock_status == SOCK_OK) {
         while (IS_BUF_FULL(data)) {
-            pthread_cond_wait(&data->buf_cond, &data->buf_mutex);
+            if (wait_cond(data) != 0) break;
         }
         read_from_socket(data);
-        pthread_cond_signal(&data->buf_cond);
+        signal_cond(data);
     }
-    pthread_mutex_unlock(&data->buf_mutex);
+    unlock_mutex(data);
 
     return param;
 }
@@ -243,21 +321,21 @@ void *writer_thread(void *param) {
         return NULL;
     }
 
-    while (!data->both_threads_created && !data->error_creating_threads) {}
-    if (data->error_creating_threads) {
+    if (lock_mutex(data) != 0) return NULL;
+    if (!data->both_threads_created || data->error_creating_threads) {
+        unlock_mutex(data);
         return NULL;
     }
-
-    pthread_mutex_lock(&data->buf_mutex);
+    
     while (!IS_DATA_INADEQUATE(data) && !(data->sock_status == SOCK_DONE && IS_BUF_EMPTY(data))) {
         while (IS_BUF_EMPTY(data)) {
-            pthread_cond_wait(&data->buf_cond, &data->buf_mutex);
+            if (wait_cond(data) != 0) break;
         }
         read_from_stdin(data);
         write_to_stdout(data);
-        pthread_cond_signal(&data->buf_cond);
+        signal_cond(data);
     }
-    pthread_mutex_unlock(&data->buf_mutex);
+    unlock_mutex(data);
 
     return param;
 }
@@ -268,28 +346,36 @@ void http_spin(url_t *url) {
         return;
     }
 
-    int err_code;
+    int err_code, num_threads_created = 0;
     pthread_t thread_ids[2];
     void *(*thread_funcs[2])(void *) = { reader_thread, writer_thread };
+
+    if (lock_mutex(&data) != 0) {
+        destroy_data(&data);
+        return;
+    }
 
     for (int i = 0; i < 2; i++) {
         err_code = pthread_create(&thread_ids[i], NULL, thread_funcs[i], (void *)&data);
         if (err_code != 0) {
             print_error("Unable to create thread", err_code);
             data.error_creating_threads = TRUE;
-            return;
+            break;
         }
+        num_threads_created++;
     }
-    data.both_threads_created = TRUE;
+    if (num_threads_created == 2) data.both_threads_created = TRUE;
 
-    for (int i = 0; i < 2; i++) {
+    unlock_mutex(&data);
+
+    for (int i = 0; i < num_threads_created; i++) {
         err_code = pthread_join(thread_ids[i], NULL);
         if (err_code != 0) {
             print_error("Unable to join thread", err_code);
         }
     }
 
-    close(data.sock_fd);
+    destroy_data(&data);
 }
 
 int main(int argc, char **argv) {
@@ -300,21 +386,20 @@ int main(int argc, char **argv) {
 
     url_t *url = parse_url(argv[1], 80);
     if (url == NULL) {
-        fprintf(stderr, "Unable to parse URL\n");
         return EXIT_FAILURE;
     }
-    if (strcmp(url->protocol, "http") != 0) {
-        fprintf(stderr, "Only HTTP protocol is supported\n");
+    if (strcmp(url->scheme, "http") != 0) {
+        fprintf(stderr, "Only HTTP scheme is supported\n");
         free_url(url);
         return EXIT_FAILURE;
     }
     if (url->user != NULL) {
-        fprintf(stderr, "HTTP authentication is not supported\n");
+        fprintf(stderr, "User is not supported\n");
         free_url(url);
         return EXIT_FAILURE;
     }
-    if (url->port == URL_PORT_ERROR) {
-        fprintf(stderr, "Port parsing error\n");
+    if (!IS_PORT_VALID(url->port)) {
+        fprintf(stderr, "Invalid port, got %d\n", url->port);
         free_url(url);
         return EXIT_FAILURE;
     }

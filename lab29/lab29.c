@@ -9,11 +9,13 @@
 
 #define BUF_SIZE 4096
 #define MAX_NUM_OF_LINES 25
-#define MAX_BYTES_PER_LINE 200
+#define MAX_BYTES_PER_LINE 185
 
 #define IS_BUF_EMPTY(data) ((data)->buf_size == 0)
 #define IS_BUF_FULL(data) ((data)->buf_size == BUF_SIZE)
 #define IS_DATA_INADEQUATE(data) ((data)->sock_status == SOCK_ERROR || (data)->stdin_status == STREAM_ERROR || (data)->stdout_status == STREAM_ERROR)
+
+#define IS_PORT_VALID(PORT) (0 < (PORT) && (PORT) <= 0xFFFF)
 
 #define SOCK_OK (0)
 #define SOCK_ERROR (-1)
@@ -83,12 +85,13 @@ int open_socket(char *hostname, int port) {
 
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd == -1) {
-        perror("socket error");
+        perror("open_socket: socket error");
         return -1;
     }
 
     if (connect(sock_fd, (struct sockaddr *) &addr, sizeof(struct sockaddr_in)) == -1) {
-        perror("connect error");
+        perror("open_socket: connect error");
+        close (sock_fd);
         return -1;
     }
 
@@ -96,15 +99,34 @@ int open_socket(char *hostname, int port) {
 }
 
 int send_get_request(int sock_fd, url_t *url) {
-    char buf[BUF_SIZE] = { 0 };
-    sprintf(buf, "GET %s HTTP/1.0\r\n\r\n", url->full);
+    const char *method = "GET";
+    const char *url_str = url->full;
+    const char *protocol = "HTTP/1.0";
 
-    ssize_t bytes_written = write(sock_fd, buf, strlen(buf));
-    if (bytes_written == -1) {
-        perror("Unable to write GET request to socket");
+    size_t method_len = strlen(method);
+    size_t url_len = strlen(url_str);
+    size_t protocol_len = strlen(protocol);
+    size_t total_len = method_len + 1 + url_len + 1 + protocol_len + 4;
+
+    char *buf = (char *)malloc(total_len + 1);
+    if (buf == NULL) {
+        perror("send_get_request: Can't allocate memory for request buf");
         return -1;
     }
+    sprintf(buf, "%s %s %s\r\n\r\n", method, url_str, protocol);
 
+    ssize_t total_written = 0;
+    while (total_written < total_len) {
+        ssize_t bytes_written = write(sock_fd, buf, total_len - total_written);
+        if (bytes_written == -1) {
+            perror("send_get_request: Unable to write GET request to socket");
+            free(buf);
+            return -1;
+        }
+        total_written += bytes_written;
+    }
+
+    free(buf);
     return 0;
 }
 
@@ -125,17 +147,12 @@ int init_data(url_t *url, data_t *data) {
     data->stdout_status = STREAM_OK;
 
     memset(&data->sock_aiocb, 0, sizeof(struct aiocb));
-    data->sock_aiocb.aio_fildes = data->sock_fd;
-
     memset(&data->stdout_aiocb, 0, sizeof(struct aiocb));
-    data->stdout_aiocb.aio_fildes = STDOUT_FILENO;
-
     memset(&data->stdin_aiocb, 0, sizeof(struct aiocb));
+    data->sock_aiocb.aio_fildes = data->sock_fd;
+    data->stdout_aiocb.aio_fildes = STDOUT_FILENO;
     data->stdin_aiocb.aio_fildes = STDIN_FILENO;
-
-    for (int i = 0; i < 3; i++) {
-        data->aiocb_buf[i] = NULL;
-    }
+    for (int i = 0; i < 3; i++) data->aiocb_buf[i] = NULL;
 
     return 0;
 }
@@ -146,7 +163,7 @@ void init_aio_read_from_sock(data_t *data) {
     data->sock_aiocb.aio_nbytes = BUF_SIZE - data->buf_size;
 
     if (aio_read(&data->sock_aiocb) == -1) {
-        perror("init_aio_read_from_sock");
+        perror("init_aio_read_from_sock: aio_read error");
         data->sock_status = SOCK_ERROR;
         return;
     }
@@ -172,7 +189,7 @@ void init_aio_write_to_stdout(data_t *data) {
     data->stdout_aiocb.aio_nbytes = output_length;
 
     if (aio_write(&data->stdout_aiocb) == -1) {
-        perror("init_aio_read_from_sock");
+        perror("init_aio_write_to_stdout: aio_write error");
         data->stdout_status = STREAM_ERROR;
         return;
     }
@@ -185,7 +202,7 @@ void init_aio_read_from_stdin(data_t *data) {
     data->stdin_aiocb.aio_nbytes = BUF_SIZE;
 
     if (aio_read(&data->stdin_aiocb) == -1) {
-        perror("init_aio_read_from_sock");
+        perror("init_aio_read_from_stdin: aio_read error");
         data->stdin_status = STREAM_ERROR;
         return;
     }
@@ -217,12 +234,9 @@ void read_from_socket(data_t *data) {
     }
 
     int err_code = aio_error(&data->sock_aiocb);
-    if (err_code == EINPROGRESS) {
-        return;
-    }
+    if (err_code == EINPROGRESS) return;
     if (err_code != 0) {
-        if (err_code < 0) perror("read_from_socket");
-        else print_error("read_from_socket", err_code);
+        perror("read_from_socket: aio_error");
         data->sock_status = SOCK_ERROR;
         data->sock_aiocb.aio_nbytes = 0;
         data->aiocb_buf[0] = NULL;
@@ -231,7 +245,7 @@ void read_from_socket(data_t *data) {
     
     ssize_t bytes_read = aio_return(&data->sock_aiocb);
     if (bytes_read == -1) {
-        perror("Unable to read from socket");
+        perror("read_from_socket: aio_return");
         data->sock_status = SOCK_ERROR;
         data->sock_aiocb.aio_nbytes = 0;
         data->aiocb_buf[0] = NULL;
@@ -258,12 +272,9 @@ void write_to_stdout(data_t *data) {
     }
 
     int err_code = aio_error(&data->stdout_aiocb);
-    if (err_code == EINPROGRESS) {
-        return;
-    }
+    if (err_code == EINPROGRESS) return;
     if (err_code != 0) {
-        if (err_code < 0) perror("write_to_stdout");
-        else print_error("write_to_stdout", err_code);
+        perror("write_to_stdout: aio_error");
         data->stdout_status = STREAM_ERROR;
         data->stdout_aiocb.aio_nbytes = 0;
         data->aiocb_buf[1] = NULL;
@@ -272,7 +283,7 @@ void write_to_stdout(data_t *data) {
 
     ssize_t bytes_written = aio_return(&data->stdout_aiocb);
     if (bytes_written == -1) {
-        perror("Unable to write to stdout");
+        perror("write_to_stdout: aio_return");
         data->stdout_status = STREAM_ERROR;
         data->stdout_aiocb.aio_nbytes = 0;
         data->aiocb_buf[1] = NULL;
@@ -291,12 +302,9 @@ void read_from_stdin(data_t *data) {
     }
 
     int err_code = aio_error(&data->stdin_aiocb);
-    if (err_code == EINPROGRESS) {
-        return;
-    }
+    if (err_code == EINPROGRESS) return;
     if (err_code != 0) {
-        if (err_code < 0) perror("read_from_stdin");
-        else print_error("read_from_stdin", err_code);
+        perror("read_from_stdin: aio_error");
         data->stdin_status = STREAM_ERROR;
         data->stdin_aiocb.aio_nbytes = 0;
         data->aiocb_buf[2] = NULL;
@@ -305,7 +313,7 @@ void read_from_stdin(data_t *data) {
 
     ssize_t bytes_read = aio_return(&data->stdin_aiocb);
     if (bytes_read == -1) {
-        perror("Unable to read from socket");
+        perror("read_from_stdin: aio_return");
         data->stdin_status = STREAM_ERROR;
         data->stdin_aiocb.aio_nbytes = 0;
         data->aiocb_buf[2] = NULL;
@@ -329,7 +337,7 @@ void http_spin(url_t *url) {
         }
 
         if (aio_suspend(data.aiocb_buf, 3, NULL) == -1) {
-            perror("aio_suspend error");
+            perror("http_spin: aio_suspend error");
             break;
         }
 
@@ -349,21 +357,20 @@ int main(int argc, char **argv) {
 
     url_t *url = parse_url(argv[1], 80);
     if (url == NULL) {
-        fprintf(stderr, "Unable to parse URL\n");
         return EXIT_FAILURE;
     }
-    if (strcmp(url->protocol, "http") != 0) {
-        fprintf(stderr, "Only HTTP protocol is supported\n");
+    if (strcmp(url->scheme, "http") != 0) {
+        fprintf(stderr, "Only HTTP scheme is supported\n");
         free_url(url);
         return EXIT_FAILURE;
     }
     if (url->user != NULL) {
-        fprintf(stderr, "HTTP authentication is not supported\n");
+        fprintf(stderr, "User is not supported\n");
         free_url(url);
         return EXIT_FAILURE;
     }
-    if (url->port == URL_PORT_ERROR) {
-        fprintf(stderr, "Port parsing error\n");
+    if (!IS_PORT_VALID(url->port)) {
+        fprintf(stderr, "Invalid port, got %d\n", url->port);
         free_url(url);
         return EXIT_FAILURE;
     }
