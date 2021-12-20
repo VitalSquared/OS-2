@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <netdb.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
 #include "cache.h"
@@ -30,8 +31,13 @@
 #define SOCK_DONE (-2)
 #define NON_SOCK_ERROR (-3)
 
+#define HTTP_NO_HEADERS (-1)
+
 #define HTTP_CODE_UNDEFINED (-1)
 #define HTTP_CODE_NONE 0
+
+#define HTTP_CONTENT_LENGTH (1)
+#define HTTP_CHUNKED (0)
 
 #define TRUE 1
 #define FALSE 0
@@ -43,20 +49,10 @@
 #define IS_PORT_VALID(PORT) (0 < (PORT) && (PORT) <= 0xFFFF)
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
-const char *client_error_list[] = {
-        "<html><body>Internal error occurred</body></html>",
-        "<html><body>Unable to load page</body></html>",
-        "<html><body>Invalid request</body></html>",
-        "<html><body>Only GET method supported</body></html>",
-        "<html><body>Host not found</body></html>",
-        "<html><body>Non-authoritative</body></html>",
-        "<html><body>Request Refused</body></html>",
-        "<html><body>No address records</body></html>",
-        "<html><body>Unknown Error</body></html>",
-};
-
 typedef struct http {
-    int sock_fd, code, clients, status, error;
+    int sock_fd, code, clients, status, error, is_response_complete;
+    int response_type, headers_size; ssize_t response_size;
+    struct phr_chunked_decoder decoder;
     char *data;     ssize_t data_size;
     char *request;  ssize_t request_size;   ssize_t request_bytes_written;
     char *host, *path;
@@ -89,6 +85,24 @@ int select_max_fd = STDIN_FILENO;
 client_list_t client_list = { .head = NULL };
 http_list_t http_list = { .head = NULL };
 
+int convert_number(char *str, int *number) {
+    errno = 0;
+    char *endptr = "";
+    long num = strtol(str, &endptr, 10);
+
+    if (errno != 0) {
+        if (ERROR_LOG) perror("Can't convert given number");
+        return -1;
+    }
+    if (strcmp(endptr, "") != 0) {
+        if (ERROR_LOG) fprintf(stderr, "Number contains invalid symbols\n");
+        return -1;
+    }
+
+    *number = (int)num;
+    return 0;
+}
+
 int strings_equal_by_length(const char *str1, size_t len1, const char *str2, size_t len2) {
     if (len1 != len2) return FALSE;
     if (str1 == NULL || str2 == NULL) return FALSE;
@@ -96,6 +110,15 @@ int strings_equal_by_length(const char *str1, size_t len1, const char *str2, siz
         if (str1[i] != str2[i]) return FALSE;
     }
     return TRUE;
+}
+
+int get_number_from_string_by_length(const char *str, size_t length) {
+    char buf1[length + 1];
+    memcpy(buf1, str, length);
+    buf1[length] = '\0';
+    int num = -1;
+    convert_number(buf1, &num);
+    return num;
 }
 
 int open_listen_socket(int port) {
@@ -166,7 +189,12 @@ int open_http_socket(const char *hostname, int port, int *out_error) {
     if (connect(sock_fd, (struct sockaddr *) &addr, sizeof(struct sockaddr_in)) == -1) {
         if (ERROR_LOG) perror("open_http_socket: connect error");
         *out_error = CONNECTION_ERROR;
+        close(sock_fd);
         return -1;
+    }
+
+    if (fcntl(sock_fd, F_SETFL, O_NONBLOCK) == -1) {
+        if (ERROR_LOG) perror("open_http_socket: fcntl error");
     }
 
     return sock_fd;
@@ -190,6 +218,9 @@ http_t *create_http(int sock_fd, char *request, ssize_t request_size, char *host
     new_http->clients = 1;  //we create http if there is a request, so we already have 1 client
     new_http->data = NULL; new_http->data_size = 0;
     new_http->code = HTTP_CODE_UNDEFINED;
+    new_http->headers_size = HTTP_NO_HEADERS;
+    new_http->is_response_complete = FALSE;
+    new_http->decoder.consume_trailer = 1;
     new_http->sock_fd = sock_fd;
     new_http->request = request; new_http->request_size = request_size; new_http->request_bytes_written = 0;
     new_http->host = host; new_http->path = path;
@@ -220,6 +251,10 @@ void remove_http(http_t *http) {
 }
 
 void create_client(int client_sock_fd) {
+    if (fcntl(client_sock_fd, F_SETFL, O_NONBLOCK) == -1) {
+        if (ERROR_LOG) perror("create_client: fcntl error");
+    }
+
     client_t *new_client = (client_t *)calloc(1, sizeof(client_t));
     if (new_client == NULL) {
         if (ERROR_LOG) perror("create_client: Unable to allocate memory for client struct");
@@ -295,7 +330,7 @@ void print_active_connections() {
     printf("\n");
     http_t *cur_http = http_list.head;
     while (cur_http != NULL) {
-        printf("[http %d] status=%d, code=%d, clients=%d\n", cur_http->sock_fd, cur_http->status, cur_http->code, cur_http->clients);
+        printf("[http %d] status=%d, code=%d, clients=%d, is_response_complete=%d, response_type=%d\n", cur_http->sock_fd, cur_http->status, cur_http->code, cur_http->clients, cur_http->is_response_complete, cur_http->response_type);
         if (cur_http->cache_entry != NULL) {
             printf("- cache=%s %s, size=%zd\n", cur_http->cache_entry->host, cur_http->cache_entry->path, cur_http->cache_entry->size);
         }
@@ -373,7 +408,7 @@ void handle_client_request(client_t *client, ssize_t bytes_read) {
     if (err_code == -2) return;
 
     cache_entry_t *entry = cache_find(host, path, &cache);
-    if (entry != NULL) {
+    if (entry != NULL && entry->is_full) {
         if (INFO_LOG) printf("[%d] Getting data from cache for '%s%s'\n", client->sock_fd, host, path);
         client->status = GETTING_FROM_CACHE;
         client->cache_entry = entry;
@@ -432,8 +467,10 @@ void handle_client_request(client_t *client, ssize_t bytes_read) {
 
 void read_data_from_client(client_t *client) {
     char buf[BUF_SIZE + 1];
-    ssize_t bytes_read = read(client->sock_fd, buf, BUF_SIZE);
+    errno = 0;
+    ssize_t bytes_read = recv(client->sock_fd, buf, BUF_SIZE, MSG_DONTWAIT);
     if (bytes_read == -1) {
+        if (errno == EWOULDBLOCK) return;
         if (ERROR_LOG) perror("read_data_from_client: Unable to read from client socket");
         client->status = SOCK_ERROR;
         client->request_size = 0;
@@ -489,14 +526,12 @@ void read_data_from_client(client_t *client) {
 void check_finished_writing_to_client(client_t *client) {
     size_t size = 0;
 
-    if (client->status == NON_SOCK_ERROR) size = (ssize_t)strlen(client_error_list[client->error]);
-    else if (client->status == GETTING_FROM_CACHE) size = client->cache_entry->size;
+    if (client->status == GETTING_FROM_CACHE) size = client->cache_entry->size;
     else if (client->status == DOWNLOADING) size = client->http_entry->data_size;
 
     if (client->bytes_written >= size && (
                 (client->status == GETTING_FROM_CACHE && client->cache_entry->is_full) ||
-                (client->status == DOWNLOADING && client->http_entry->status == SOCK_DONE) ||
-                client->status == NON_SOCK_ERROR)) {
+                (client->status == DOWNLOADING && client->http_entry->is_response_complete))) {
         client->bytes_written = 0;
 
         client->cache_entry = NULL;
@@ -514,11 +549,7 @@ void write_to_client(client_t *client) {
     const char *buf = "";
     ssize_t size = 0;
 
-    if (client->status == NON_SOCK_ERROR) {
-        buf = client_error_list[client->error];
-        size = (ssize_t)strlen(client_error_list[client->error]);
-    }
-    else if (client->status == GETTING_FROM_CACHE) {
+    if (client->status == GETTING_FROM_CACHE) {
         buf = client->cache_entry->data;
         size = client->cache_entry->size;
     }
@@ -538,17 +569,66 @@ void write_to_client(client_t *client) {
     check_finished_writing_to_client(client);
 }
 
-void get_http_response_code(http_t *entry, ssize_t bytes_read) {
+void parse_http_response_headers(http_t *entry) {
     int minor_version, status;
     const char *msg;
     size_t msg_len;
     struct phr_header headers[100];
     size_t num_headers = sizeof(headers) / sizeof(headers[0]);
 
-    if (entry->code == HTTP_CODE_UNDEFINED) {
-        int err_code = phr_parse_response(entry->data, entry->data_size, &minor_version, &status, &msg, &msg_len, headers, &num_headers, entry->data_size - bytes_read);
-        if (err_code == -1) entry->code = HTTP_CODE_NONE;
-        else if (err_code != -2) entry->code = status;
+    int headers_size = phr_parse_response(entry->data, entry->data_size, &minor_version, &status, &msg, &msg_len, headers, &num_headers, 0);
+    if (headers_size == -1) {
+        if (ERROR_LOG) fprintf(stderr, "parse_http_response: Unable to parse http response headers\n");
+        entry->status = NON_SOCK_ERROR;
+        entry->error = CONNECTION_ERROR;
+        close(entry->sock_fd);
+        entry->data_size = 0;
+        free(entry->data); entry->data = NULL;
+        entry->is_response_complete = FALSE;
+        return;
+    }
+
+    if (status != 0) entry->code = status; //request may be incomplete, but it managed to get status
+
+    if (headers_size >= 0) entry->headers_size = headers_size;
+
+    for (int i = 0; i < num_headers; i++) {
+        if (strings_equal_by_length(headers[i].name, headers[i].name_len, "Transfer-Encoding", strlen("Transfer-Encoding")) &&
+                strings_equal_by_length(headers[i].value, headers[i].value_len, "chunked", strlen("chunked"))) {
+            entry->response_type = HTTP_CHUNKED;
+        }
+        if (strings_equal_by_length(headers[i].name, headers[i].name_len, "Content-Length", strlen("Content-Length"))) {
+            entry->response_type = HTTP_CONTENT_LENGTH;
+            entry->response_size = get_number_from_string_by_length(headers[i].value, headers[i].value_len);
+            if (entry->response_size == -1) {
+                entry->status = NON_SOCK_ERROR;
+                entry->error = INTERNAL_ERROR;
+                entry->is_response_complete = FALSE;
+                entry->data_size = 0;
+                free(entry->data); entry->data = NULL;
+                return;
+            }
+        }
+    }
+}
+
+void parse_http_response_chunked(http_t *entry, char *buf, ssize_t offset, ssize_t size) {
+    size_t rsize = size;
+    ssize_t pret;
+
+    pret = phr_decode_chunked(&entry->decoder, buf + offset, &rsize);
+    if (pret == -1) {
+        if (ERROR_LOG) fprintf(stderr, "parse_http_response_chunked: Unable to parse response\n");
+        entry->status = NON_SOCK_ERROR;
+        entry->error = INTERNAL_ERROR;
+        entry->is_response_complete = FALSE;
+        entry->data_size = 0;
+        if (entry->cache_entry != NULL) {
+            cache_remove(entry->cache_entry, &cache);
+            entry->cache_entry = NULL;
+        }
+        else free(entry->data);
+        entry->data = NULL;
     }
 
     if (entry->code == 200) {
@@ -561,12 +641,36 @@ void get_http_response_code(http_t *entry, ssize_t bytes_read) {
             entry->cache_entry->size = entry->data_size;
         }
     }
+
+    if (pret == 0) {
+        if (entry->cache_entry != NULL) entry->cache_entry->is_full = TRUE;
+        entry->is_response_complete = TRUE;
+    }
+}
+
+void parse_http_response_by_length(http_t *entry) {
+    if (entry->code == 200) {
+        if (entry->cache_entry == NULL) {
+            entry->cache_entry = cache_add(entry->host, entry->path, entry->data, entry->data_size, &cache);
+            if (entry->cache_entry == NULL) entry->code = HTTP_CODE_NONE;
+        }
+        else {
+            entry->cache_entry->data = entry->data;
+            entry->cache_entry->size = entry->data_size;
+        }
+    }
+    if (entry->data_size == entry->headers_size + entry->response_size) {
+        if (entry->cache_entry != NULL) entry->cache_entry->is_full = TRUE;
+        entry->is_response_complete = TRUE;
+    }
 }
 
 void read_http_data(http_t *entry) {
     char buf[BUF_SIZE];
-    ssize_t bytes_read = read(entry->sock_fd, buf, BUF_SIZE);//entry->data + entry->data_size, BUF_SIZE);
+    errno = 0;
+    ssize_t bytes_read = recv(entry->sock_fd, buf, BUF_SIZE, MSG_DONTWAIT);
     if (bytes_read == -1) {
+        if (errno == EWOULDBLOCK) return;
         if (ERROR_LOG) perror("read_http_data: Unable to read from http socket");
         entry->status = SOCK_ERROR;
         close(entry->sock_fd);
@@ -582,7 +686,9 @@ void read_http_data(http_t *entry) {
     if (bytes_read == 0) {
         entry->status = SOCK_DONE;
         close(entry->sock_fd);
-        if (entry->cache_entry != NULL) entry->cache_entry->is_full = TRUE;
+        if (entry->cache_entry != NULL && !entry->cache_entry->is_full) {
+            cache_remove(entry->cache_entry, &cache);
+        }
         return;
     }
 
@@ -611,7 +717,18 @@ void read_http_data(http_t *entry) {
     memcpy(entry->data + entry->data_size, buf, bytes_read);
     entry->data_size += bytes_read;
 
-    get_http_response_code(entry, bytes_read);
+    int b_no_headers = entry->headers_size == HTTP_NO_HEADERS;
+    if (entry->headers_size == HTTP_NO_HEADERS) parse_http_response_headers(entry);
+    if (entry->status == NON_SOCK_ERROR) return;
+
+    if (entry->headers_size >= 0) {
+        if (entry->response_type == HTTP_CHUNKED) {
+            parse_http_response_chunked(entry, buf, b_no_headers ? entry->headers_size : 0, b_no_headers ? entry->data_size - entry->headers_size : bytes_read);
+        }
+        else if (entry->response_type == HTTP_CONTENT_LENGTH) {
+            parse_http_response_by_length(entry);
+        }
+    }
 }
 
 void send_http_request(http_t *entry) {
@@ -658,11 +775,7 @@ void init_select_masks() {
                 cur_client->http_entry = NULL;
                 cur_client->bytes_written = 0;
             }
-            else if (cur_client->http_entry->status == DOWNLOADING && cur_client->http_entry->cache_entry != NULL) {
-                cur_client->status = GETTING_FROM_CACHE;
-                cur_client->cache_entry = cur_client->http_entry->cache_entry;
-            }
-            else if (cur_client->http_entry->status == SOCK_DONE && cur_client->http_entry->cache_entry != NULL) {
+            else if (cur_client->http_entry->cache_entry != NULL && cur_client->http_entry->cache_entry->is_full) {
                 cur_client->status = GETTING_FROM_CACHE;
                 cur_client->cache_entry = cur_client->http_entry->cache_entry;
                 cur_client->http_entry->clients--;
@@ -674,9 +787,8 @@ void init_select_masks() {
         FD_SET(cur_client->sock_fd, &readfds);
 
         if ((cur_client->status == DOWNLOADING && cur_client->bytes_written < cur_client->http_entry->data_size) ||
-            (cur_client->status == GETTING_FROM_CACHE && cur_client->bytes_written < cur_client->cache_entry->size) ||
-            cur_client->status == NON_SOCK_ERROR) {
-            FD_SET(cur_client->sock_fd, &writefds);  //we need to write to client: 1) data from http, or 2) data from cache, or 3) error
+            (cur_client->status == GETTING_FROM_CACHE && cur_client->bytes_written < cur_client->cache_entry->size)) {
+            FD_SET(cur_client->sock_fd, &writefds);
         }
 
         cur_client = next;
@@ -697,7 +809,7 @@ void init_select_masks() {
                 cache_remove(cur_http->cache_entry, &cache);
                 cur_http->cache_entry = NULL;
             }
-            if (cur_http->status == DOWNLOADING) {
+            if (cur_http->status == DOWNLOADING || cur_http->status == AWAITING_REQUEST) {
                 close(cur_http->sock_fd);
             }
             remove_http(cur_http);
@@ -721,12 +833,11 @@ void update_connections() {
     client_t *cur_client = client_list.head;
     while (cur_client != NULL) {
         client_t *next = cur_client->next;
-        if (cur_client->status != SOCK_ERROR && cur_client->status != SOCK_DONE && FD_ISSET(cur_client->sock_fd, &readfds)) {
+        if (cur_client->status != SOCK_ERROR && cur_client->status != SOCK_DONE && cur_client->status != NON_SOCK_ERROR && FD_ISSET(cur_client->sock_fd, &readfds)) {
             read_data_from_client(cur_client);
         }
         if (((cur_client->status == DOWNLOADING && cur_client->http_entry->status == DOWNLOADING && cur_client->bytes_written < cur_client->http_entry->data_size) ||
-            (cur_client->status == GETTING_FROM_CACHE && cur_client->cache_entry->size >= 0 && cur_client->bytes_written < cur_client->cache_entry->size) ||
-            cur_client->status == NON_SOCK_ERROR) && FD_ISSET(cur_client->sock_fd, &writefds)) {
+            (cur_client->status == GETTING_FROM_CACHE && cur_client->bytes_written < cur_client->cache_entry->size)) && FD_ISSET(cur_client->sock_fd, &writefds)) {
             write_to_client(cur_client);
         }
         cur_client = next;
@@ -749,7 +860,7 @@ void update_accept() {
     if (FD_ISSET(listen_fd, &readfds)) {
         int client_sock_fd = accept(listen_fd, NULL, NULL);
         if (client_sock_fd == -1) {
-            if (ERROR_LOG) perror("create_client: accept error");
+            if (ERROR_LOG) perror("update_accept: accept error");
             return;
         }
         create_client(client_sock_fd);
@@ -789,24 +900,6 @@ void proxy_spin() {
         update_accept();
         if (update_stdin() == -1) break;
     }
-}
-
-int convert_number(char *str, int *number) {
-    errno = 0;
-    char *endptr = "";
-    long num = strtol(str, &endptr, 10);
-
-    if (errno != 0) {
-        if (ERROR_LOG) perror("Can't convert given number");
-        return -1;
-    }
-    if (strcmp(endptr, "") != 0) {
-        if (ERROR_LOG) fprintf(stderr, "Number contains invalid symbols\n");
-        return -1;
-    }
-
-    *number = (int)num;
-    return 0;
 }
 
 int parse_port(char *listen_port_str, int *listen_port) {
