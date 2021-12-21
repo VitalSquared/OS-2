@@ -38,24 +38,24 @@ cache_entry_t *cache_add(char *host, char *path, char *data, ssize_t size, cache
     node->host = host;
     node->path = path;
 
-    write_lock_rwlock(&cache->rwlock, "cache_add: Unable to write-lock rwlock");
+    write_lock_rwlock(&cache->rwlock, "cache_add");
     node->prev = NULL;
     node->next = cache->head;
     cache->head = node;
     if (node->next != NULL) node->next->prev = node;
-    unlock_rwlock(&cache->rwlock, "cache_add: Unable to unlock rwlock");
+    unlock_rwlock(&cache->rwlock, "cache_add");
 
     return node;
 }
 
 cache_entry_t *cache_find(const char *host, const char *path, cache_t *cache) {
-    read_lock_rwlock(&cache->rwlock, "cache_find: Unable to read-lock rwlock");
+    read_lock_rwlock(&cache->rwlock, "cache_find");
     cache_entry_t *cur = cache->head;
     while (cur != NULL) {
         if (STR_EQ(host, cur->host) && STR_EQ(path, cur->path)) break;
         cur = cur->next;
     }
-    unlock_rwlock(&cache->rwlock, "cache_find: Unable to unlock rwlock");
+    unlock_rwlock(&cache->rwlock, "cache_find");
     return cur;
 }
 
@@ -69,7 +69,7 @@ void free_cache_entry(cache_entry_t *entry) {
 }
 
 void cache_remove(cache_entry_t *entry, cache_t *cache) {
-    write_lock_rwlock(&cache->rwlock, "cache_remove: Unable to write-lock rwlock");
+    write_lock_rwlock(&cache->rwlock, "cache_remove");
     if (entry == cache->head) {
         cache->head = entry->next;
         if (cache->head != NULL) cache->head->prev = NULL;
@@ -78,7 +78,7 @@ void cache_remove(cache_entry_t *entry, cache_t *cache) {
         entry->prev->next = entry->next;
         if (entry->next != NULL) entry->next->prev = entry->prev;
     }
-    unlock_rwlock(&cache->rwlock, "cache_remove: Unable to unlock rwlock");
+    unlock_rwlock(&cache->rwlock, "cache_remove");
     free_cache_entry(entry);
 }
 
@@ -94,11 +94,11 @@ void cache_destroy(cache_t *cache) {
 }
 
 void cache_print_content(cache_t *cache) {
-    read_lock_rwlock(&cache->rwlock, "cache_print_content: Unable to read-lock rwlock");
+    read_lock_rwlock(&cache->rwlock, "cache_print_content");
     cache_entry_t *cur = cache->head;
     while (cur != NULL) {
         printf("%s %s %zd full=%d\n", cur->host, cur->path, cur->size, cur->is_full);
         cur = cur->next;
     }
-    unlock_rwlock(&cache->rwlock, "cache_print_content: Unable to unlock rwlock");
+    unlock_rwlock(&cache->rwlock, "cache_print_content");
 }

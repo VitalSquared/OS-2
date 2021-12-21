@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <unistd.h>
 #include "states.h"
 
 void print_error(const char *prefix, int code) {
@@ -49,6 +50,18 @@ int get_number_from_string_by_length(const char *str, size_t length) {
     int num = -1;
     convert_number(buf1, &num);
     return num;
+}
+
+void close_socket(int *sock_fd) {
+    if (*sock_fd < 0) return;
+    close(*sock_fd);
+    *sock_fd = -1;
+}
+
+void free_with_null(void **mem) {
+    if (mem == NULL) return;
+    free(*mem);
+    *mem = NULL;
 }
 
 int read_lock_rwlock(pthread_rwlock_t *rwlock, const char *error) {
