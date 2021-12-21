@@ -15,15 +15,10 @@ typedef struct {
 } cache_t;
 
 int cache_init(cache_t *cache);
-
 cache_entry_t *cache_add(char *host, char *path, char *data, ssize_t size, cache_t *cache);
-
 cache_entry_t *cache_find(const char *host, const char *path, cache_t *cache);
-
 void cache_remove(cache_entry_t *entry, cache_t *cache);
-
 void cache_destroy(cache_t *cache);
-
 void cache_print_content(cache_t *cache);
 
 #endif
