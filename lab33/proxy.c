@@ -91,7 +91,7 @@ void print_active_connections() {
         if (cur_client->http_entry != NULL) {
             printf("- http=%d %s %s, size=%zd, bytes_written=%zd\n", cur_client->http_entry->sock_fd, cur_client->http_entry->host, cur_client->http_entry->path, cur_client->http_entry->data_size, cur_client->bytes_written);
         }
-        cur_client = cur_client->next;
+        cur_client = cur_client->global_next;
     }
     unlock_rwlock(&global_client_list.rwlock, "print_active_connections: CLIENT");
 
@@ -104,7 +104,7 @@ void print_active_connections() {
         if (cur_http->cache_entry != NULL) {
             printf("- cache=%s %s, size=%zd\n", cur_http->cache_entry->host, cur_http->cache_entry->path, cur_http->cache_entry->size);
         }
-        cur_http = cur_http->next;
+        cur_http = cur_http->global_next;
     }
     unlock_rwlock(&global_http_list.rwlock, "print_active_connections: HTTP");
 }
@@ -129,7 +129,6 @@ void *client_cancel_handler(void *param) {
 void *client_worker(void *param) {
     client_list_t client_list = { .head = NULL };
     fd_set readfds, writefds;
-    struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 };
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     pthread_cleanup_push(client_cancel_handler, &client_list);
@@ -149,11 +148,23 @@ void *client_worker(void *param) {
             client_t *next = client->next;
 
             if (IS_ERROR_OR_DONE_STATUS(client->status)) {
-                break;
+                remove_client(client, &client_list, &global_client_list);
+                client = next;
+                continue;
             }
 
             client_update_http_info(client);
             check_finished_writing_to_client(client);
+
+            if (client->http_entry != NULL) {
+                FD_SET(client->http_entry->client_wakeup_fd, &readfds);
+                select_max_fd = MAX(select_max_fd, client->http_entry->client_wakeup_fd);
+            }
+
+            if (client->should_wake_http && client->http_entry != NULL) {
+                FD_SET(client->http_entry->http_wakeup_fd, &writefds);
+                select_max_fd = MAX(select_max_fd, client->http_entry->http_wakeup_fd);
+            }
 
             FD_SET(client->sock_fd, &readfds);
             if (client->status == DOWNLOADING) {
@@ -175,7 +186,7 @@ void *client_worker(void *param) {
             client = next;
         }
 
-        int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, &timeout);
+        int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
             if (ERROR_LOG) fprintf(stderr, "client_worker: select error\n");
             break;
@@ -185,6 +196,19 @@ void *client_worker(void *param) {
         client = client_list.head;
         while (client != NULL) {
             client_t *next = client->next;
+
+            char buf[1] = { 1 };
+            if (client->http_entry != NULL && FD_ISSET(client->http_entry->client_wakeup_fd, &readfds)) {
+                read(client->http_entry->client_wakeup_fd, buf, 1);
+                FD_CLR(client->http_entry->client_wakeup_fd, &readfds);
+            }
+            if (client->should_wake_http && client->http_entry != NULL && FD_ISSET(client->http_entry->http_wakeup_fd, &writefds)) {
+                size_t bytes_written = write(client->http_entry->http_wakeup_fd, buf, 1);
+                if (bytes_written >= 0) {
+                    client->should_wake_http = FALSE;
+                    FD_CLR(client->http_entry->http_wakeup_fd, &writefds);
+                }
+            }
 
             if (!IS_ERROR_OR_DONE_STATUS(client->status) && FD_ISSET(client->sock_fd, &readfds)) {
                 client_read_data(client, &global_http_list, &http_queue, &cache);
@@ -260,7 +284,17 @@ void *http_worker(void *param) {
             http_t *next = http->next;
 
             if (http_check_disconnect(http)) {
-                break;
+                remove_http(http, &http_list, &global_http_list, &cache);
+                http = next;
+                continue;
+            }
+
+            FD_SET(http->http_wakeup_fd, &readfds);
+            select_max_fd = MAX(select_max_fd, http->http_wakeup_fd);
+
+            if (http->should_wake_clients) {
+                FD_SET(http->client_wakeup_fd, &writefds);
+                select_max_fd = MAX(select_max_fd, http->client_wakeup_fd);
             }
 
             if (!IS_ERROR_OR_DONE_STATUS(http->status)) {
@@ -284,6 +318,18 @@ void *http_worker(void *param) {
         http = http_list.head;
         while (http != NULL) {
             http_t *next = http->next;
+            char buf[1] = { 1 };
+            if (FD_ISSET(http->http_wakeup_fd, &readfds)) {
+                read(http->http_wakeup_fd, buf, 1);
+                FD_CLR(http->http_wakeup_fd, &readfds);
+            }
+            if (FD_ISSET(http->client_wakeup_fd, &writefds)) {
+                size_t bytes_written = write(http->http_wakeup_fd, buf, 1);
+                if (bytes_written >= 0) {
+                    http->should_wake_clients = FALSE;
+                    FD_CLR(http->client_wakeup_fd, &writefds);
+                }
+            }
             if (!IS_ERROR_OR_DONE_STATUS(http->status) && FD_ISSET(http->sock_fd, &readfds)) {
                 http_read_data(http, &cache);
             }

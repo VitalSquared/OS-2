@@ -61,6 +61,7 @@ void client_goes_error(client_t *client) {
     if (client->http_entry != NULL) {
         write_lock_rwlock(&client->http_entry->rwlock, "client_goes_error");
         client->http_entry->clients--;
+        client->should_wake_http = TRUE;
         unlock_rwlock(&client->http_entry->rwlock, "client_goes_error");
         client->http_entry = NULL;
     }
@@ -78,6 +79,7 @@ void client_update_http_info(client_t *client) {
         }
         else if (client->http_entry->cache_entry != NULL && client->http_entry->cache_entry->is_full) {
             client->http_entry->clients--;
+            client->should_wake_http = TRUE;
             client->cache_entry = client->http_entry->cache_entry;
             unlock_rwlock(&client->http_entry->rwlock, "client_update_http_info: FULL CACHE");
             client->http_entry = NULL;
@@ -174,6 +176,7 @@ void handle_client_request(client_t *client, ssize_t bytes_read, http_list_t *ht
         if (STR_EQ(http_entry->host, host) && STR_EQ(http_entry->path, path) &&
             (http_entry->status == DOWNLOADING || http_entry->status == SOCK_DONE) && !http_entry->dont_accept_clients) {   //there is active http
             http_entry->clients++;
+            client->should_wake_http = TRUE;
             unlock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY FOUND");
             client->request_size = 0;
             free_with_null((void **)&client->request);
@@ -232,6 +235,7 @@ void client_read_data(client_t *client, http_list_t *http_list, http_queue_t *ht
             write_lock_rwlock(&client->http_entry->rwlock, "client_read_data: HTTP ENTRY");
             if (client->bytes_written == client->http_entry->data_size) {
                 client->http_entry->clients--;
+                client->should_wake_http = TRUE;
                 unlock_rwlock(&client->http_entry->rwlock, "client_read_data: HTTP ENTRY EQUALS");
                 client->http_entry = NULL;
                 client->bytes_written = 0;
@@ -285,6 +289,7 @@ void check_finished_writing_to_client(client_t *client) {
         write_lock_rwlock(&client->http_entry->rwlock, "check_finished_writing_to_client: HTTP");
         if (client->bytes_written >= client->http_entry->data_size && client->http_entry->is_response_complete) {
             client->http_entry->clients--;
+            client->should_wake_http = TRUE;
             unlock_rwlock(&client->http_entry->rwlock, "check_finished_writing_to_client: HTTP COMPLETE");
             client->http_entry = NULL;
             client->bytes_written = 0;

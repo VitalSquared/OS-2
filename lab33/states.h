@@ -44,4 +44,6 @@ int read_lock_rwlock(pthread_rwlock_t *rwlock, const char *func_name);
 int write_lock_rwlock(pthread_rwlock_t *rwlock, const char *func_name);
 int unlock_rwlock(pthread_rwlock_t *rwlock, const char *func_name);
 
+int open_wakeup_pipe(int *fd1, int *fd2);
+
 #endif
