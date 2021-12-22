@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include "states.h"
 
 void print_error(const char *prefix, int code) {
@@ -86,4 +87,25 @@ int unlock_rwlock(pthread_rwlock_t *rwlock, const char *error) {
         if (ERROR_LOG) print_error(error, err_code);
     }
     return err_code;
+}
+
+int open_wakeup_pipe(int *fd1, int *fd2) {
+    int fildes[2];
+    if (pipe(fildes) == -1) {
+        perror("open_wakeup_pipe: pipe error");
+        return -1;
+    }
+
+    if (fcntl(fildes[0], F_SETFL, O_NONBLOCK) == -1) {
+        if (ERROR_LOG) perror("open_wakeup_socket: fcntl error");
+    }
+
+    if (fcntl(fildes[1], F_SETFL, O_NONBLOCK) == -1) {
+        if (ERROR_LOG) perror("open_wakeup_socket: fcntl error");
+    }
+
+    *fd1 = fildes[0];
+    *fd2 = fildes[1];
+
+    return 0;
 }

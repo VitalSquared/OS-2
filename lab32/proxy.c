@@ -125,8 +125,8 @@ void *client_worker(void *param) {
         return NULL;
     }
 
+    int select_max_fd = 0;
     fd_set readfds, writefds;
-    struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 };
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     pthread_cleanup_push(client_cancel_handler, client);
@@ -141,11 +141,24 @@ void *client_worker(void *param) {
         client_update_http_info(client);
         check_finished_writing_to_client(client);
 
+        if (client->http_entry != NULL) {
+            FD_SET(client->http_entry->client_wakeup_fd, &readfds);
+            select_max_fd = MAX(select_max_fd, client->http_entry->client_wakeup_fd);
+        }
+
+        if (client->should_wake_http && client->http_entry != NULL) {
+            FD_SET(client->http_entry->http_wakeup_fd, &writefds);
+            select_max_fd = MAX(select_max_fd, client->http_entry->http_wakeup_fd);
+        }
+
         FD_SET(client->sock_fd, &readfds);
+        select_max_fd = MAX(select_max_fd, client->sock_fd);
+
         if (client->status == DOWNLOADING) {
             read_lock_rwlock(&client->http_entry->rwlock, "client_worker: DOWNLOADING FD_SET");
             if (client->bytes_written < client->http_entry->data_size) {
                 FD_SET(client->sock_fd, &writefds);
+                select_max_fd = MAX(select_max_fd, client->sock_fd);
             }
             unlock_rwlock(&client->http_entry->rwlock, "client_worker: DOWNLOADING FD_SET");
         }
@@ -153,16 +166,26 @@ void *client_worker(void *param) {
             read_lock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE FD_SET");
             if (client->bytes_written < client->cache_entry->size) {
                 FD_SET(client->sock_fd, &writefds);
+                select_max_fd = MAX(select_max_fd, client->sock_fd);
             }
             unlock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE FD_SET");
         }
 
-        int num_fds_ready = select(client->sock_fd + 1, &readfds, &writefds, NULL, &timeout);
+        int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
             if (ERROR_LOG) fprintf(stderr, "client_worker: select error\n");
             break;
         }
         if (num_fds_ready == 0) continue;
+
+        char buf[1] = { 1 };
+        if (client->http_entry != NULL && FD_ISSET(client->http_entry->client_wakeup_fd, &readfds)) {
+            read(client->http_entry->client_wakeup_fd, buf, 1);
+        }
+        if (client->should_wake_http && client->http_entry != NULL && FD_ISSET(client->http_entry->http_wakeup_fd, &writefds)) {
+            size_t bytes_written = write(client->http_entry->http_wakeup_fd, buf, 1);
+            if (bytes_written >= 0) client->should_wake_http = FALSE;
+        }
 
         if (!IS_ERROR_OR_DONE_STATUS(client->status) && FD_ISSET(client->sock_fd, &readfds)) {
             client_read_data(client, &http_list, &cache, http_worker);
@@ -212,8 +235,8 @@ void *http_worker(void *param) {
         return NULL;
     }
 
+    int select_max_fd = 0;
     fd_set readfds, writefds;
-    struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 };
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     pthread_cleanup_push(http_cancel_handler, http);
@@ -225,19 +248,38 @@ void *http_worker(void *param) {
             break;
         }
 
+        FD_SET(http->http_wakeup_fd, &readfds);
+        select_max_fd = MAX(select_max_fd, http->http_wakeup_fd);
+
+        if (http->should_wake_clients) {
+            FD_SET(http->client_wakeup_fd, &writefds);
+            select_max_fd = MAX(select_max_fd, http->client_wakeup_fd);
+        }
+
         if (!IS_ERROR_OR_DONE_STATUS(http->status)) {
             FD_SET(http->sock_fd, &readfds);
+            select_max_fd = MAX(select_max_fd, http->sock_fd);
         }
         if (http->status == AWAITING_REQUEST) {
             FD_SET(http->sock_fd, &writefds);
+            select_max_fd = MAX(select_max_fd, http->sock_fd);
         }
 
-        int num_fds_ready = select(http->sock_fd + 1, &readfds, &writefds, NULL, &timeout);
+        int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
             if (ERROR_LOG) fprintf(stderr, "http_worker: select error\n");
             break;
         }
         if (num_fds_ready == 0) continue;
+
+        char buf[1] = { 1 };
+        if (FD_ISSET(http->http_wakeup_fd, &readfds)) {
+            read(http->http_wakeup_fd, buf, 1);
+        }
+        if (FD_ISSET(http->client_wakeup_fd, &writefds)) {
+            size_t bytes_written = write(http->http_wakeup_fd, buf, 1);
+            if (bytes_written >= 0) http->should_wake_clients = FALSE;
+        }
 
         if (!IS_ERROR_OR_DONE_STATUS(http->status) && FD_ISSET(http->sock_fd, &readfds)) {
             http_read_data(http, &cache);
@@ -284,14 +326,13 @@ int update_stdin(fd_set *readfds) {
 
 void proxy_spin() {
     fd_set readfds;
-    struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 };
 
     while (TRUE) {
         FD_ZERO(&readfds);
         FD_SET(listen_fd, &readfds);
         FD_SET(STDIN_FILENO, &readfds);
 
-        int num_fds_ready = select(listen_fd + 1, &readfds, NULL, NULL, &timeout);
+        int num_fds_ready = select(listen_fd + 1, &readfds, NULL, NULL, NULL);
         if (num_fds_ready == -1) {
             if (ERROR_LOG) perror("proxy_spin: select error");
             break;

@@ -14,11 +14,12 @@ typedef struct http {
     cache_entry_t *cache_entry;
     pthread_t thread_id;
     pthread_rwlock_t rwlock;
+    int client_wakeup_fd, http_wakeup_fd, should_wake_clients;
     struct http *prev, *next;
 } http_t;
 
 typedef struct client {
-    int sock_fd, status;
+    int sock_fd, status, should_wake_http;
     cache_entry_t *cache_entry;  http_t *http_entry;
     char *request;  ssize_t request_size;
     ssize_t bytes_written;

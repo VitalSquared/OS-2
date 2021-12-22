@@ -17,6 +17,11 @@ http_t *create_http(int sock_fd, char *request, ssize_t request_size, char *host
         return NULL;
     }
 
+    if (open_wakeup_pipe(&new_http->client_wakeup_fd, &new_http->http_wakeup_fd) == -1) {
+        free(new_http);
+        return NULL;
+    }
+
     if (http_init(new_http, sock_fd, request, request_size, host, path) == -1) {
         free(new_http);
         return NULL;
@@ -58,6 +63,7 @@ int http_init(http_t *http, int sock_fd, char *request, ssize_t request_size, ch
     http->response_type = HTTP_RESPONSE_NONE;
     http->is_response_complete = FALSE;
     http->decoder.consume_trailer = 1;
+    http->should_wake_clients = FALSE;
     http->sock_fd = sock_fd;
     http->request = request; http->request_size = request_size; http->request_bytes_written = 0;
     http->host = host; http->path = path;
@@ -76,6 +82,8 @@ void http_destroy(http_t *http, cache_t *cache) {
         free(http->path);
     }
     close_socket(&http->sock_fd);
+    close_socket(&http->client_wakeup_fd);
+    close_socket(&http->http_wakeup_fd);
     pthread_rwlock_destroy(&http->rwlock);
 }
 
@@ -152,6 +160,7 @@ void http_goes_error(http_t *http) {
     http->data_size = 0;
     http->is_response_complete = FALSE;
     http->dont_accept_clients = TRUE;
+    http->should_wake_clients = TRUE;
 }
 
 void parse_http_response_headers(http_t *http) {
@@ -219,6 +228,7 @@ void parse_http_response_chunked(http_t *entry, char *buf, ssize_t offset, ssize
             unlock_rwlock(&entry->cache_entry->rwlock, "parse_http_response_chunked: FULL");
         }
         entry->is_response_complete = TRUE;
+        entry->should_wake_clients = TRUE;
     }
 }
 
@@ -242,6 +252,7 @@ void parse_http_response_by_length(http_t *entry, cache_t *cache) {
             unlock_rwlock(&entry->cache_entry->rwlock, "parse_http_response_by_length: FULL");
         }
         entry->is_response_complete = TRUE;
+        entry->should_wake_clients = TRUE;
     }
 }
 
@@ -262,6 +273,9 @@ void http_read_data(http_t *entry, cache_t *cache) {
         unlock_rwlock(&entry->rwlock, "http_read_data: -1");
         return;
     }
+
+    entry->should_wake_clients = TRUE;
+
     if (bytes_read == 0) {
         entry->status = SOCK_DONE;
         if (entry->response_type == HTTP_RESPONSE_NONE) {
