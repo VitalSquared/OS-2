@@ -221,7 +221,7 @@ void client_read_data(client_t *client, http_list_t *http_list, http_queue_t *ht
     ssize_t bytes_read = recv(client->sock_fd, buf, BUF_SIZE, MSG_DONTWAIT);
     if (bytes_read == -1) {
         if (errno == EWOULDBLOCK) return;
-        if (ERROR_LOG) perror("read_data_from_client: Unable to read from client socket");
+        if (ERROR_LOG) perror("client_read_data: Unable to read from client socket");
         client_goes_error(client);
         return;
     }
@@ -265,7 +265,7 @@ void client_read_data(client_t *client, http_list_t *http_list, http_queue_t *ht
         }
 
         if (error) {
-            if (ERROR_LOG) fprintf(stderr, "read_data_from_client: client read data when we shouldn't\n");
+            if (ERROR_LOG) fprintf(stderr, "client_read_data: client read data when we shouldn't\n");
             /*if (INFO_LOG) {
                 buf[bytes_read] = '\n';
                 write(STDERR_FILENO, buf, bytes_read + 1);
@@ -276,7 +276,7 @@ void client_read_data(client_t *client, http_list_t *http_list, http_queue_t *ht
 
     char *check = (char *)realloc(client->request, client->request_size + BUF_SIZE);
     if (check == NULL) {
-        if (ERROR_LOG) perror("read_data_from_client: Unable to reallocate memory for client request");
+        if (ERROR_LOG) perror("client_read_data: Unable to reallocate memory for client request");
         client_goes_error(client);
         return;
     }
@@ -340,7 +340,7 @@ void write_to_client(client_t *client) {
     ssize_t bytes_written = write(client->sock_fd, buf + offset, size - offset);
     if (bytes_written == -1) {
         if (ERROR_LOG) perror("write_to_client: Unable to write to client socket");
-        client->status = SOCK_ERROR;
+        client_goes_error(client);
         return;
     }
     client->bytes_written += bytes_written;

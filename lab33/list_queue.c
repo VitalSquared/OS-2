@@ -119,10 +119,10 @@ http_t *http_dequeue(http_queue_t *http_queue, int num) {
     http_t *new_http = NULL;
     pthread_mutex_lock(&http_queue->mutex);
 
-    while (http_queue->head == NULL) {
+    /*while (http_queue->head == NULL) {
         if (num != 0) break;
         pthread_cond_wait(&http_queue->cond, &http_queue->mutex);
-    }
+    }*/
 
     if (http_queue->head != NULL && num <= http_queue->max_num) {
         new_http = http_queue->tail;
@@ -161,10 +161,10 @@ client_t *client_dequeue(client_queue_t *client_queue, int num) {
     client_t *new_client = NULL;
     pthread_mutex_lock(&client_queue->mutex);
 
-    while (client_queue->head == NULL) {
+    /*while (client_queue->head == NULL) {
         if (num != 0) break;
         pthread_cond_wait(&client_queue->cond, &client_queue->mutex);
-    }
+    }*/
 
     if (client_queue->head != NULL && num <= client_queue->max_num) {
         new_client = client_queue->tail;

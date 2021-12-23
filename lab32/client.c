@@ -228,7 +228,7 @@ void client_read_data(client_t *client, http_list_t *http_list, cache_t *cache, 
     ssize_t bytes_read = recv(client->sock_fd, buf, BUF_SIZE, MSG_DONTWAIT);
     if (bytes_read == -1) {
         if (errno == EWOULDBLOCK) return;
-        if (ERROR_LOG) perror("read_data_from_client: Unable to read from client socket");
+        if (ERROR_LOG) perror("client_read_data: Unable to read from client socket");
         client_goes_error(client);
         return;
     }
@@ -272,7 +272,7 @@ void client_read_data(client_t *client, http_list_t *http_list, cache_t *cache, 
         }
 
         if (error) {
-            if (ERROR_LOG) fprintf(stderr, "read_data_from_client: client read data when we shouldn't\n");
+            if (ERROR_LOG) fprintf(stderr, "client_read_data: client read data when we shouldn't\n");
             /*if (INFO_LOG) {
                 buf[bytes_read] = '\n';
                 write(STDERR_FILENO, buf, bytes_read + 1);
@@ -347,7 +347,7 @@ void write_to_client(client_t *client) {
     ssize_t bytes_written = write(client->sock_fd, buf + offset, size - offset);
     if (bytes_written == -1) {
         if (ERROR_LOG) perror("write_to_client: Unable to write to client socket");
-        client->status = SOCK_ERROR;
+        client_goes_error(client);
         return;
     }
     client->bytes_written += bytes_written;

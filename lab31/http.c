@@ -214,7 +214,7 @@ void http_read_data(http_t *entry, cache_t *cache) {
     ssize_t bytes_read = recv(entry->sock_fd, buf, BUF_SIZE, MSG_DONTWAIT);
     if (bytes_read == -1) {
         if (errno == EWOULDBLOCK) return;
-        if (ERROR_LOG) perror("read_http_data: Unable to read from http socket");
+        if (ERROR_LOG) perror("http_read_data: Unable to read from http socket");
         http_goes_error(entry);
         return;
     }
@@ -229,14 +229,14 @@ void http_read_data(http_t *entry, cache_t *cache) {
     }
 
     if (entry->status != DOWNLOADING) {
-        if (ERROR_LOG) fprintf(stderr, "read_http_data: reading from http when we shouldn't\n");
-        if (INFO_LOG) write(STDERR_FILENO, buf, bytes_read);
+        if (ERROR_LOG) fprintf(stderr, "http_read_data: reading from http when we shouldn't\n");
+        //if (INFO_LOG) write(STDERR_FILENO, buf, bytes_read);
         return;
     }
 
     char *check = (char *)realloc(entry->data, entry->data_size + BUF_SIZE);
     if (check == NULL) {
-        if (ERROR_LOG) perror("read_http_data: Unable to reallocate memory for http data");
+        if (ERROR_LOG) perror("http_read_data: Unable to reallocate memory for http data");
         http_goes_error(entry);
         return;
     }
@@ -268,7 +268,7 @@ void http_send_request(http_t *entry) {
         free_with_null((void **)&entry->request);
     }
     if (bytes_written == -1) {
-        if (ERROR_LOG) perror("send_http_request: unable to write to http socket");
+        if (ERROR_LOG) perror("http_send_request: unable to write to http socket");
         http_goes_error(entry);
     }
 }
