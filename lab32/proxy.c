@@ -118,6 +118,76 @@ void *client_cancel_handler(void *param) {
     return NULL;
 }
 
+int init_client_select_masks(client_t *client, fd_set *readfds, fd_set *writefds) {
+    FD_ZERO(readfds);
+    FD_ZERO(writefds);
+    if (IS_ERROR_OR_DONE_STATUS(client->status)) return -1;
+
+    int select_max_fd = 0;
+    client_update_http_info(client);
+    check_finished_writing_to_client(client);
+
+    if (client->http_entry != NULL) {   //check wake-up from http
+        FD_SET(client->http_entry->client_pipe_fd, readfds);
+        select_max_fd = MAX(select_max_fd, client->http_entry->client_pipe_fd);
+    }
+
+    FD_SET(client->sock_fd, readfds);
+    select_max_fd = MAX(select_max_fd, client->sock_fd);
+
+    if (client->status == DOWNLOADING) {
+        read_lock_rwlock(&client->http_entry->rwlock, "client_worker: DOWNLOADING FD_SET");
+        if (client->bytes_written < client->http_entry->data_size) {
+            FD_SET(client->sock_fd, writefds);
+            select_max_fd = MAX(select_max_fd, client->sock_fd);
+        }
+        unlock_rwlock(&client->http_entry->rwlock, "client_worker: DOWNLOADING FD_SET");
+    }
+    else if (client->status == GETTING_FROM_CACHE) {
+        read_lock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE FD_SET");
+        if (client->bytes_written < client->cache_entry->size) {
+            FD_SET(client->sock_fd, writefds);
+            select_max_fd = MAX(select_max_fd, client->sock_fd);
+        }
+        unlock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE FD_SET");
+    }
+
+    return select_max_fd;
+}
+
+void update_client_connection(client_t *client, fd_set *readfds, fd_set *writefds) {
+    char buf[1] = { 1 };
+    if (client->http_entry != NULL && FD_ISSET(client->http_entry->client_pipe_fd, readfds)) {
+        read(client->http_entry->client_pipe_fd, buf, 1);
+    }
+
+    if (!IS_ERROR_OR_DONE_STATUS(client->status) && FD_ISSET(client->sock_fd, readfds)) {
+        client_read_data(client, &http_list, &cache, http_worker);
+    }
+    if (FD_ISSET(client->sock_fd, writefds)) {
+        ssize_t http_data_size = 0;
+        int http_status;
+        if (client->http_entry != NULL) {
+            read_lock_rwlock(&client->http_entry->rwlock, "client_worker: HTTP POST select");
+            http_data_size = client->http_entry->data_size;
+            http_status = client->http_entry->status;
+            unlock_rwlock(&client->http_entry->rwlock, "client_worker: HTTP POST select");
+        }
+
+        ssize_t cache_data_size = 0;
+        if (client->cache_entry != NULL) {
+            read_lock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE POST select");
+            cache_data_size = client->cache_entry->size;
+            unlock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE POST select");
+        }
+
+        if (((client->status == DOWNLOADING && http_status == DOWNLOADING && client->bytes_written < http_data_size) ||
+            (client->status == GETTING_FROM_CACHE && client->bytes_written < cache_data_size))) {
+            write_to_client(client);
+        }
+    }
+}
+
 void *client_worker(void *param) {
     client_t *client = (client_t *)param;
     if (client == NULL) {
@@ -125,51 +195,13 @@ void *client_worker(void *param) {
         return NULL;
     }
 
-    int select_max_fd = 0;
     fd_set readfds, writefds;
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     pthread_cleanup_push(client_cancel_handler, client);
     while (TRUE) {
-        FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
-
-        if (IS_ERROR_OR_DONE_STATUS(client->status)) {
-            break;
-        }
-
-        client_update_http_info(client);
-        check_finished_writing_to_client(client);
-
-        if (client->http_entry != NULL) {
-            FD_SET(client->http_entry->client_wakeup_fd, &readfds);
-            select_max_fd = MAX(select_max_fd, client->http_entry->client_wakeup_fd);
-        }
-
-        if (client->should_wake_http && client->http_entry != NULL) {
-            FD_SET(client->http_entry->http_wakeup_fd, &writefds);
-            select_max_fd = MAX(select_max_fd, client->http_entry->http_wakeup_fd);
-        }
-
-        FD_SET(client->sock_fd, &readfds);
-        select_max_fd = MAX(select_max_fd, client->sock_fd);
-
-        if (client->status == DOWNLOADING) {
-            read_lock_rwlock(&client->http_entry->rwlock, "client_worker: DOWNLOADING FD_SET");
-            if (client->bytes_written < client->http_entry->data_size) {
-                FD_SET(client->sock_fd, &writefds);
-                select_max_fd = MAX(select_max_fd, client->sock_fd);
-            }
-            unlock_rwlock(&client->http_entry->rwlock, "client_worker: DOWNLOADING FD_SET");
-        }
-        else if (client->status == GETTING_FROM_CACHE) {
-            read_lock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE FD_SET");
-            if (client->bytes_written < client->cache_entry->size) {
-                FD_SET(client->sock_fd, &writefds);
-                select_max_fd = MAX(select_max_fd, client->sock_fd);
-            }
-            unlock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE FD_SET");
-        }
+        int select_max_fd = init_client_select_masks(client, &readfds, &writefds);
+        if (select_max_fd == -1) break;
 
         int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
@@ -178,40 +210,7 @@ void *client_worker(void *param) {
         }
         if (num_fds_ready == 0) continue;
 
-        char buf[1] = { 1 };
-        if (client->http_entry != NULL && FD_ISSET(client->http_entry->client_wakeup_fd, &readfds)) {
-            read(client->http_entry->client_wakeup_fd, buf, 1);
-        }
-        if (client->should_wake_http && client->http_entry != NULL && FD_ISSET(client->http_entry->http_wakeup_fd, &writefds)) {
-            size_t bytes_written = write(client->http_entry->http_wakeup_fd, buf, 1);
-            if (bytes_written >= 0) client->should_wake_http = FALSE;
-        }
-
-        if (!IS_ERROR_OR_DONE_STATUS(client->status) && FD_ISSET(client->sock_fd, &readfds)) {
-            client_read_data(client, &http_list, &cache, http_worker);
-        }
-        if (FD_ISSET(client->sock_fd, &writefds)) {
-            ssize_t http_data_size = 0;
-            int http_status;
-            if (client->http_entry != NULL) {
-                read_lock_rwlock(&client->http_entry->rwlock, "client_worker: HTTP POST select");
-                http_data_size = client->http_entry->data_size;
-                http_status = client->http_entry->status;
-                unlock_rwlock(&client->http_entry->rwlock, "client_worker: HTTP POST select");
-            }
-
-            ssize_t cache_data_size = 0;
-            if (client->cache_entry != NULL) {
-                read_lock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE POST select");
-                cache_data_size = client->cache_entry->size;
-                unlock_rwlock(&client->cache_entry->rwlock, "client_worker: CACHE POST select");
-            }
-
-            if (((client->status == DOWNLOADING && http_status == DOWNLOADING && client->bytes_written < http_data_size) ||
-                (client->status == GETTING_FROM_CACHE && client->bytes_written < cache_data_size))) {
-                write_to_client(client);
-            }
-        }
+        update_client_connection(client, &readfds, &writefds);
     }
     pthread_cleanup_pop(TRUE);
 
@@ -228,6 +227,42 @@ void *http_cancel_handler(void *param) {
     return NULL;
 }
 
+int init_http_select_masks(http_t *http, fd_set *readfds, fd_set *writefds) {
+    FD_ZERO(readfds);
+    FD_ZERO(writefds);
+    int select_max_fd = 0;
+
+    if (http_check_disconnect(http)) return -1;
+
+    FD_SET(http->http_pipe_fd, readfds);   //check http wake-ups
+    select_max_fd = MAX(select_max_fd, http->http_pipe_fd);
+
+    if (!IS_ERROR_OR_DONE_STATUS(http->status)) {
+        FD_SET(http->sock_fd, readfds);
+        select_max_fd = MAX(select_max_fd, http->sock_fd);
+    }
+    if (http->status == AWAITING_REQUEST) {
+        FD_SET(http->sock_fd, writefds);
+        select_max_fd = MAX(select_max_fd, http->sock_fd);
+    }
+
+    return select_max_fd;
+}
+
+void update_http_connection(http_t *http, fd_set *readfds, fd_set *writefds) {
+    char buf[1] = { 1 };
+    if (FD_ISSET(http->http_pipe_fd, readfds)) {
+        read(http->http_pipe_fd, buf, 1);
+    }
+
+    if (!IS_ERROR_OR_DONE_STATUS(http->status) && FD_ISSET(http->sock_fd, readfds)) {
+        http_read_data(http, &cache);
+    }
+    if (http->status == AWAITING_REQUEST && FD_ISSET(http->sock_fd, writefds)) {
+        http_send_request(http);
+    }
+}
+
 void *http_worker(void *param) {
     http_t *http = (http_t *)param;
     if (http == NULL) {
@@ -235,35 +270,13 @@ void *http_worker(void *param) {
         return NULL;
     }
 
-    int select_max_fd = 0;
     fd_set readfds, writefds;
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     pthread_cleanup_push(http_cancel_handler, http);
     while (TRUE) {
-        FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
-
-        if (http_check_disconnect(http)) {
-            break;
-        }
-
-        FD_SET(http->http_wakeup_fd, &readfds);
-        select_max_fd = MAX(select_max_fd, http->http_wakeup_fd);
-
-        if (http->should_wake_clients) {
-            FD_SET(http->client_wakeup_fd, &writefds);
-            select_max_fd = MAX(select_max_fd, http->client_wakeup_fd);
-        }
-
-        if (!IS_ERROR_OR_DONE_STATUS(http->status)) {
-            FD_SET(http->sock_fd, &readfds);
-            select_max_fd = MAX(select_max_fd, http->sock_fd);
-        }
-        if (http->status == AWAITING_REQUEST) {
-            FD_SET(http->sock_fd, &writefds);
-            select_max_fd = MAX(select_max_fd, http->sock_fd);
-        }
+        int select_max_fd = init_http_select_masks(http, &readfds, &writefds);
+        if (select_max_fd == -1) break;
 
         int num_fds_ready = select(select_max_fd + 1, &readfds, &writefds, NULL, NULL);
         if (num_fds_ready == -1) {
@@ -272,21 +285,7 @@ void *http_worker(void *param) {
         }
         if (num_fds_ready == 0) continue;
 
-        char buf[1] = { 1 };
-        if (FD_ISSET(http->http_wakeup_fd, &readfds)) {
-            read(http->http_wakeup_fd, buf, 1);
-        }
-        if (FD_ISSET(http->client_wakeup_fd, &writefds)) {
-            size_t bytes_written = write(http->http_wakeup_fd, buf, 1);
-            if (bytes_written >= 0) http->should_wake_clients = FALSE;
-        }
-
-        if (!IS_ERROR_OR_DONE_STATUS(http->status) && FD_ISSET(http->sock_fd, &readfds)) {
-            http_read_data(http, &cache);
-        }
-        if (http->status == AWAITING_REQUEST && FD_ISSET(http->sock_fd, &writefds)) {
-            http_send_request(http);
-        }
+        update_http_connection(http, &readfds, &writefds);
     }
     pthread_cleanup_pop(TRUE);
 

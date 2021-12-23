@@ -13,13 +13,13 @@ typedef struct http {
     char *host, *path;
     cache_entry_t *cache_entry;
     pthread_rwlock_t rwlock;
-    int client_wakeup_fd, http_wakeup_fd, should_wake_clients;
+    int client_pipe_fd, http_pipe_fd;
     struct http *prev, *next;
     struct http *global_prev, *global_next;
 } http_t;
 
 typedef struct client {
-    int sock_fd, status, should_wake_http;
+    int sock_fd, status;
     cache_entry_t *cache_entry;  http_t *http_entry;
     char *request;  ssize_t request_size;
     ssize_t bytes_written;
@@ -31,11 +31,13 @@ typedef struct client {
 typedef struct http_list {
     http_t *head;
     pthread_rwlock_t rwlock;
+    int size;
 } http_list_t;
 
 typedef struct client_list {
     client_t *head;
     pthread_rwlock_t rwlock;
+    int size;
 } client_list_t;
 
 typedef struct client_queue {
@@ -43,6 +45,7 @@ typedef struct client_queue {
     client_t *tail;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
+    int wakeup_pipe_fd, max_num;
 } client_queue_t;
 
 typedef struct http_queue_t {
@@ -50,6 +53,13 @@ typedef struct http_queue_t {
     http_t *tail;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
+    int wakeup_pipe_fd, max_num;
 } http_queue_t;
+
+typedef struct thread_param {
+    int index;
+    int new_connection_pipe_fd;
+    int http_size, client_size;
+} thread_param_t;
 
 #endif
