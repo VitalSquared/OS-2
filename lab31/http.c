@@ -42,7 +42,10 @@ int http_init(http_t *http, int sock_fd, char *request, ssize_t request_size, ch
     http->is_response_complete = FALSE;
     http->decoder.consume_trailer = 1;
     http->sock_fd = sock_fd;
-    http->request = request; http->request_size = request_size; http->request_bytes_written = 0;
+    http->request = request;
+    http->request_size = request_size;
+    http->response_alloc_size = 0;
+    http->request_bytes_written = 0;
     http->host = host; http->path = path;
     http->cache_entry = NULL;
     return 0;
@@ -234,14 +237,17 @@ void http_read_data(http_t *entry, cache_t *cache) {
         return;
     }
 
-    char *check = (char *)realloc(entry->data, entry->data_size + BUF_SIZE);
-    if (check == NULL) {
-        if (ERROR_LOG) perror("http_read_data: Unable to reallocate memory for http data");
-        http_goes_error(entry);
-        return;
+    if (entry->data_size + bytes_read > entry->response_alloc_size) {
+        entry->response_alloc_size += BUF_SIZE;
+        char *check = (char *)realloc(entry->data, entry->response_alloc_size);
+        if (check == NULL) {
+            if (ERROR_LOG) perror("http_read_data: Unable to reallocate memory for http data");
+            http_goes_error(entry);
+            return;
+        }
+        entry->data = check;
     }
 
-    entry->data = check;
     memcpy(entry->data + entry->data_size, buf, bytes_read);
     entry->data_size += bytes_read;
 

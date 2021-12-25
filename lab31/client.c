@@ -38,6 +38,7 @@ int client_init(client_t *client, int client_sock_fd) {
     client->bytes_written = 0;
     client->request = NULL;
     client->request_size = 0;
+    client->request_alloc_size = 0;
 
     if (fcntl(client_sock_fd, F_SETFL, O_NONBLOCK) == -1) {
         if (ERROR_LOG) perror("create_client: fcntl error");
@@ -139,6 +140,8 @@ void handle_client_request(client_t *client, ssize_t bytes_read, http_list_t *ht
     }
     if (err_code == -2) return; //incomplete request
 
+    client->request_alloc_size = 0;
+
     cache_entry_t *entry = cache_find(host, path, cache);
     if (entry != NULL && entry->is_full) {
         if (INFO_LOG) printf("[%d] Getting data from cache for '%s%s'\n", client->sock_fd, host, path);
@@ -215,6 +218,7 @@ void client_read_data(client_t *client, http_list_t *http_list, cache_t *cache) 
             client->bytes_written = 0;
             client->status = AWAITING_REQUEST;
             client->request_size = 0;
+            client->request_alloc_size = 0;
             free_with_null((void **)&client->request);
         }
         else {
@@ -227,14 +231,17 @@ void client_read_data(client_t *client, http_list_t *http_list, cache_t *cache) 
         }
     }
 
-    char *check = (char *)realloc(client->request, client->request_size + BUF_SIZE);
-    if (check == NULL) {
-        if (ERROR_LOG) perror("read_data_from_client: Unable to reallocate memory for client request");
-        client_goes_error(client);
-        return;
+    if (client->request_size + bytes_read > client->request_alloc_size) {
+        client->request_alloc_size += BUF_SIZE;
+        char *check = (char *)realloc(client->request, client->request_alloc_size);
+        if (check == NULL) {
+            if (ERROR_LOG) perror("read_data_from_client: Unable to reallocate memory for client request");
+            client_goes_error(client);
+            return;
+        }
+        client->request = check;
     }
 
-    client->request = check;
     memcpy(client->request + client->request_size, buf, bytes_read);
     client->request_size += bytes_read;
 
@@ -278,6 +285,7 @@ void write_to_client(client_t *client) {
 
     ssize_t bytes_written = write(client->sock_fd, buf + offset, size - offset);
     if (bytes_written == -1) {
+        if (errno == EWOULDBLOCK) return;
         if (ERROR_LOG) perror("write_to_client: Unable to write to client socket");
         client_goes_error(client);
         return;

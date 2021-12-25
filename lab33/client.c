@@ -170,16 +170,13 @@ void handle_client_request(client_t *client, ssize_t bytes_read, http_list_t *ht
         unlock_rwlock(&cache_entry->rwlock, "handle_client_request: CACHE");
     }
 
-    //there is no cache_entry in cache:
-    read_lock_rwlock(&http_list->rwlock, "handle_client_request: HTTP LIST");
-    http_t *http_entry = http_list->head;
+    //search for queued https
+    pthread_mutex_lock(&http_queue->mutex);
+    http_t *http_entry = http_queue->head;
     while (http_entry != NULL) {    //we look for already existing http connection with the same request
         read_lock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY");
-        if (STR_EQ(http_entry->host, host) && STR_EQ(http_entry->path, path) &&
-            (http_entry->status == DOWNLOADING || http_entry->status == SOCK_DONE) && !http_entry->dont_accept_clients) {   //there is active http
+        if (STR_EQ(http_entry->host, host) && STR_EQ(http_entry->path, path)) {   //there is active http
             http_entry->clients++;
-            char buf1[1] = { 1 };
-            write(http_entry->client_pipe_fd, buf1, 1);
             unlock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY FOUND");
             client->request_size = 0;
             free_with_null((void **)&client->request);
@@ -188,7 +185,29 @@ void handle_client_request(client_t *client, ssize_t bytes_read, http_list_t *ht
         unlock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY");
         http_entry = http_entry->next;
     }
-    unlock_rwlock(&http_list->rwlock, "handle_client_request: HTTP LIST");
+    pthread_mutex_unlock(&http_queue->mutex);
+
+    if (http_entry == NULL) {
+        //there is no cache_entry in cache:
+        read_lock_rwlock(&http_list->rwlock, "handle_client_request: HTTP LIST");
+        http_entry = http_list->head;
+        while (http_entry != NULL) {    //we look for already existing http connection with the same request
+            read_lock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY");
+            if (STR_EQ(http_entry->host, host) && STR_EQ(http_entry->path, path) &&
+            (http_entry->status == DOWNLOADING || http_entry->status == SOCK_DONE) && !http_entry->dont_accept_clients) {   //there is active http
+                http_entry->clients++;
+                char buf1[1] = { 1 };
+                write(http_entry->client_pipe_fd, buf1, 1);
+                unlock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY FOUND");
+                client->request_size = 0;
+                free_with_null((void **)&client->request);
+                break;
+            }
+            unlock_rwlock(&http_entry->rwlock, "handle_client_request: HTTP ENTRY");
+            http_entry = http_entry->next;
+        }
+        unlock_rwlock(&http_list->rwlock, "handle_client_request: HTTP LIST");
+    }
 
     if (http_entry == NULL)  {  //no active http cache_entry with the same request
         int http_sock_fd = http_open_socket(host, 80);

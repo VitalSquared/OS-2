@@ -17,6 +17,8 @@
 #include "list_queue.h"
 
 int listen_fd;
+int current_thread = 0;
+int global_thread_count;
 cache_t cache;
 
 client_queue_t client_queue = { .head = NULL, .tail = NULL, .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
@@ -305,7 +307,7 @@ void *connection_worker(void *_param) {
         client_queue.max_num = MAX(client_queue.max_num, http_list.size + client_list.size);
         pthread_mutex_unlock(&client_queue.mutex);
 
-        client_t *new_client = client_dequeue(&client_queue, http_list.size + client_list.size);
+        client_t *new_client = client_dequeue(&client_queue, http_list.size + client_list.size, param->index, &current_thread, global_thread_count);
         if (new_client != NULL) {
             client_add_to_list(new_client, &client_list);
             client_add_to_global_list(new_client, &global_client_list);
@@ -315,7 +317,7 @@ void *connection_worker(void *_param) {
         http_queue.max_num = MAX(http_queue.max_num, http_list.size + client_list.size);
         pthread_mutex_unlock(&http_queue.mutex);
 
-        http_t *new_http = http_dequeue(&http_queue, http_list.size + client_list.size);
+        http_t *new_http = http_dequeue(&http_queue, http_list.size + client_list.size, param->index, &current_thread, global_thread_count);
         if (new_http != NULL) {
             http_add_to_list(new_http, &http_list);
             http_add_to_global_list(new_http, &global_http_list);
@@ -462,6 +464,7 @@ int main(int argc, char **argv) {
     int err_code, threads_created = 0;
     pthread_t threads[pool_size];
     thread_param_t param[pool_size];
+    pthread_mutex_lock(&client_queue.mutex);
     for (int i = 0; i < pool_size; i++) {
         param[i].index = i;
         param[i].new_connection_pipe_fd = fildes[1];
@@ -478,6 +481,8 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "Created %d out of %d pool threads!\n", threads_created, pool_size);
     if (threads_created == 0) return EXIT_FAILURE;
+    global_thread_count = threads_created;
+    pthread_mutex_unlock(&client_queue.mutex);
 
     proxy_spin(param, threads_created);
 

@@ -107,15 +107,15 @@ void http_enqueue(http_t *http, http_queue_t *http_queue) {
     if (http->next != NULL) http->next->prev = http;
     if (http_queue->tail == NULL) http_queue->tail = http_queue->head;
 
-    pthread_cond_broadcast(&http_queue->cond);
+    //pthread_cond_broadcast(&http_queue->cond);
 
     char buf1[1] = { 1 };
-    write(http_queue->wakeup_pipe_fd, buf1, 1);
+    write(http_queue->wakeup_pipe_fd, buf1, 4);
 
     pthread_mutex_unlock(&http_queue->mutex);
 }
 
-http_t *http_dequeue(http_queue_t *http_queue, int num) {
+http_t *http_dequeue(http_queue_t *http_queue, int num, int idx, int *cur_thr, int total_thr) {
     http_t *new_http = NULL;
     pthread_mutex_lock(&http_queue->mutex);
 
@@ -124,17 +124,26 @@ http_t *http_dequeue(http_queue_t *http_queue, int num) {
         pthread_cond_wait(&http_queue->cond, &http_queue->mutex);
     }*/
 
-    if (http_queue->head != NULL && num <= http_queue->max_num) {
+    /*if (idx != *cur_thr) {
+        char buf1[1] = { 1 };
+        write(http_queue->wakeup_pipe_fd, buf1, 4);
+        pthread_mutex_unlock(&http_queue->mutex);
+        return NULL;
+    }
+
+    *cur_thr = (*cur_thr + 1) % (total_thr);*/
+
+    if (http_queue->head != NULL /*&& num <= http_queue->max_num*/) {
         new_http = http_queue->tail;
         http_queue->tail = http_queue->tail->prev;
         if (http_queue->tail != NULL) http_queue->tail->next = NULL;
         else http_queue->head = NULL;
-    }
+    }/*
     else if (http_queue->head != NULL) {
         char buf1[1] = { 1 };
         write(http_queue->wakeup_pipe_fd, buf1, 1);
-        pthread_cond_broadcast(&http_queue->cond);
-    }
+        //pthread_cond_broadcast(&http_queue->cond);
+    }*/
 
     pthread_mutex_unlock(&http_queue->mutex);
     return new_http;
@@ -149,15 +158,15 @@ void client_enqueue(client_t *client, client_queue_t *client_queue) {
     if (client->next != NULL) client->next->prev = client;
     if (client_queue->tail == NULL) client_queue->tail = client_queue->head;
 
-    pthread_cond_broadcast(&client_queue->cond);
+    //pthread_cond_broadcast(&client_queue->cond);
 
     char buf1[1] = { 1 };
-    write(client_queue->wakeup_pipe_fd, buf1, 1);
+    write(client_queue->wakeup_pipe_fd, buf1, 4);
 
     pthread_mutex_unlock(&client_queue->mutex);
 }
 
-client_t *client_dequeue(client_queue_t *client_queue, int num) {
+client_t *client_dequeue(client_queue_t *client_queue, int num, int idx, int *cur_thr, int total_thr) {
     client_t *new_client = NULL;
     pthread_mutex_lock(&client_queue->mutex);
 
@@ -166,17 +175,26 @@ client_t *client_dequeue(client_queue_t *client_queue, int num) {
         pthread_cond_wait(&client_queue->cond, &client_queue->mutex);
     }*/
 
-    if (client_queue->head != NULL && num <= client_queue->max_num) {
+    /*if (idx != *cur_thr) {
+        char buf1[1] = { 1 };
+        write(client_queue->wakeup_pipe_fd, buf1, 4);
+        pthread_mutex_unlock(&client_queue->mutex);
+        return NULL;
+    }
+
+    *cur_thr = (*cur_thr + 1) % (total_thr);*/
+
+    if (client_queue->head != NULL /*&& num <= client_queue->max_num*/) {
         new_client = client_queue->tail;
         client_queue->tail = client_queue->tail->prev;
         if (client_queue->tail != NULL) client_queue->tail->next = NULL;
         else client_queue->head = NULL;
-    }
+    }/*
     else if (client_queue->head != NULL) {
         char buf1[1] = { 1 };
         write(client_queue->wakeup_pipe_fd, buf1, 1);
-        pthread_cond_broadcast(&client_queue->cond);
-    }
+        //pthread_cond_broadcast(&client_queue->cond);
+    }*/
 
     pthread_mutex_unlock(&client_queue->mutex);
     return new_client;
